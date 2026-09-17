@@ -78,6 +78,23 @@
 #define CAPTURE_INTERVAL_MS     30000UL    // 30 segundos entre capturas (deep sleep)
 
 /* ===========================================================================
+ * 4. LED DE ESTADO  -  rojo integrado en GPIO33
+ *
+ *  En la AI-Thinker este LED NO esta cableado directo a alimentacion (por
+ *  eso no se ve nada al conectar la placa aunque si llegue corriente): hay
+ *  que forzar el pin desde el firmware. Es activo en BAJO.
+ *
+ *  Se enciende al empezar el ciclo despierto y se apaga justo antes de
+ *  esp_deep_sleep_start(), para no gastar bateria durante el deep sleep.
+ *  Mismo GPIO33 que aparece en las secciones 5 y 6 como el unico ADC1 libre:
+ *  no hay conflicto porque aqui se usa como salida digital, no como entrada
+ *  analogica, y la camara no lo ocupa.
+ * ==========================================================================*/
+#define STATUS_LED_ENABLED      1
+#define STATUS_LED_PIN          33
+#define STATUS_LED_ACTIVE_LOW   1      // 1 = LOW enciende (placas AI-Thinker)
+
+/* ===========================================================================
  * 5. CAMARA OV2640  -  PINES AI-THINKER  (NO TOCAR salvo otra placa)
  *
  *  OJO: la camara ocupa GPIO 0,5,18,19,21,22,23,25,26,27,32,34,35,36,39.

@@ -83,6 +83,10 @@ static void go_to_sleep() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
 
+#if STATUS_LED_ENABLED
+  digitalWrite(STATUS_LED_PIN, STATUS_LED_ACTIVE_LOW ? HIGH : LOW);   // apagado
+#endif
+
   LOG("SLEEP: durmiendo %lu ms", (unsigned long)CAPTURE_INTERVAL_MS);
   Serial.flush();
 
@@ -99,6 +103,11 @@ void setup() {
   Serial.println();
   LOG("=== %s (%s) ===", DEVICE_NAME, DEVICE_ID);
   LOG("Reset reason: %d", (int)esp_reset_reason());
+
+#if STATUS_LED_ENABLED
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, STATUS_LED_ACTIVE_LOW ? LOW : HIGH);   // encendido
+#endif
 
 #if POWER_DISABLE_BROWNOUT
   /* Evita reinicios por los picos de corriente del WiFi con pilas gastadas.
