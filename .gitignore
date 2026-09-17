@@ -1,0 +1,28 @@
+# --- Arduino IDE -----------------------------------------------------------
+build/
+*.bin
+*.elf
+*.map
+*.hex
+*.d
+*.o
+*.a
+
+# El IDE 2.x guarda aqui el estado de la ventana, no el proyecto
+.theia/
+sketch.json
+
+# --- Credenciales ----------------------------------------------------------
+# Si algun dia se sacan WIFI_SSID/WIFI_PASSWORD de config.h a un fichero
+# aparte, este es el nombre previsto.
+secrets.h
+**/secrets.h
+
+# --- Editores / SO ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+Desktop.ini
