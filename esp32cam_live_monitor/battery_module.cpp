@@ -65,19 +65,23 @@ static bool ads_read_reg(uint8_t reg, uint16_t *out) {
   return true;
 }
 
-/* Una medida simple (AINn contra GND) en modo disparo unico. */
-static bool ads_read_channel(uint8_t channel, int16_t *counts) {
+/* Una medida simple (AINn contra GND) en modo disparo unico.
+ *
+ * La velocidad es un parametro y no BATTERY_ADS_DATA_RATE fijo porque la
+ * medida bajo carga necesita el chip al maximo: a 128 SPS cada conversion
+ * promedia 7.8 ms y se traga el pico de TX, que dura 1-2 ms. */
+static bool ads_read_channel_rate(uint8_t channel, uint8_t rate, int16_t *counts) {
   const uint16_t cfg =
       (uint16_t)(1u << 15) |                                   // OS: arrancar
       (uint16_t)(((uint16_t)(0x4 + (channel & 0x3))) << 12) |  // MUX
       (uint16_t)(((uint16_t)BATTERY_ADS_PGA & 0x7) << 9) |     // PGA
       (uint16_t)(1u << 8) |                                    // disparo unico
-      (uint16_t)(((uint16_t)BATTERY_ADS_DATA_RATE & 0x7) << 5) |
+      (uint16_t)(((uint16_t)rate & 0x7) << 5) |
       (uint16_t)0x0003;                                        // sin comparador
 
   if (!ads_write_reg(ADS_REG_CONFIG, cfg)) return false;
 
-  delay(kConversionMs);
+  delay((1000UL / kDataRateSps[rate & 0x7]) + 2UL);
 
   /* El bit OS vuelve a 1 cuando la conversion ha terminado. Se sondea por si
    * el chip va mas lento de lo previsto (p. ej. bus a baja velocidad). */
@@ -93,6 +97,10 @@ static bool ads_read_channel(uint8_t channel, int16_t *counts) {
 
   *counts = (int16_t)raw;   // el resultado viene en complemento a dos
   return true;
+}
+
+static bool ads_read_channel(uint8_t channel, int16_t *counts) {
+  return ads_read_channel_rate(channel, BATTERY_ADS_DATA_RATE, counts);
 }
 
 /* ===========================================================================
@@ -277,10 +285,78 @@ bool battery_update(bool force) {
     s_critical_hits = 0;
   }
 
-  LOG("BAT: %.3f V (raw %.3f) -> %u%% [%s]",
-      s_voltage_ema, s_voltage_raw, (unsigned)s_percent,
-      battery_state_name(s_state));
+  /* La tension por celda es la escala intuitiva con pilas AA: 1.60 recien
+   * compradas, 1.20 a mitad de vida, 0.90 agotadas. La curva trabaja con ese
+   * numero, asi que verlo en el log evita tener que dividir a mano. */
+  LOG("BAT: %.3f V (%.3f V/celda, raw %.3f) -> %u%% [%s]",
+      s_voltage_ema, s_voltage_ema / (float)BATTERY_CELLS_SERIES,
+      s_voltage_raw, (unsigned)s_percent, battery_state_name(s_state));
+
+#if BATTERY_CALIB_HELPER
+  /* Sugerencia de calibracion sin multimetro: si el pack que hay puesto esta
+   * recien estrenado, su tension en vacio deberia ser BATTERY_VOLT_FULL.
+   *
+   * Se deshace la calibracion actual antes de dividir para que la sugerencia
+   * siga siendo correcta aunque BATTERY_CALIBRATION ya no valga 1.000: asi el
+   * numero que imprime es siempre el definitivo, no un incremento. */
+  const float sin_calibrar = pack_volts / BATTERY_CALIBRATION;
+  if (sin_calibrar > 0.1f) {
+    LOG("BAT: si el pack es NUEVO -> BATTERY_CALIBRATION sugerido %.3f "
+        "(referencia %.2f V)",
+        BATTERY_VOLT_FULL / sin_calibrar, (float)BATTERY_VOLT_FULL);
+  }
+#endif
+
   return true;
+#endif
+}
+
+/* ---------------------------------------------------------------------------
+ * Medida bajo carga
+ *
+ *  Busca el MINIMO durante una ventana, en vez de promediar: aqui interesa
+ *  justo lo contrario que en battery_update(). Alli el promedio filtra los
+ *  picos para saber la tension real del pack; aqui el pico ES el dato.
+ *
+ *  Bloquea window_ms. Sin ADS1115 se limita a esperar ese tiempo, para que
+ *  quien la llame no tenga que cambiar su temporizacion.
+ * -------------------------------------------------------------------------*/
+uint32_t battery_sample_min_mv(uint32_t window_ms) {
+#if !BATTERY_ENABLED || !BATTERY_LOAD_SAMPLING
+  delay(window_ms);
+  return 0;
+#else
+  if (!s_present) {
+    delay(window_ms);
+    return 0;
+  }
+
+  const uint32_t started = millis();
+  float          min_v   = 0.0f;
+  bool           any     = false;
+
+  while ((millis() - started) < window_ms) {
+    int16_t counts = 0;
+    if (!ads_read_channel_rate(BATTERY_ADS_CHANNEL, BATTERY_LOAD_DATA_RATE,
+                               &counts)) {
+      continue;
+    }
+    if (counts < 0) counts = 0;
+
+    const float pin_v  = ((float)counts * BATTERY_ADS_LSB_MV) / 1000.0f;
+    const float pack_v = pin_v * kDividerFactor * BATTERY_CALIBRATION;
+
+    /* Descarta lecturas absurdas: un 0 suele ser el bus fallando, no un pack
+     * a cero (a cero el ESP32 ya no estaria ejecutando esto). */
+    if (pack_v < 0.5f) continue;
+
+    if (!any || pack_v < min_v) {
+      min_v = pack_v;
+      any   = true;
+    }
+  }
+
+  return any ? (uint32_t)lroundf(min_v * 1000.0f) : 0;
 #endif
 }
 

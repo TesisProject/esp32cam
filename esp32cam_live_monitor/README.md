@@ -30,7 +30,7 @@ fuente, cada una con su propio `secrets.h` antes de flashearla.
 | Medida de batería | ADS1115 por I2C + divisor resistivo **220 k / 100 k** (solo para el log por serie) |
 | Red | **Solo estación** — necesita el router para llegar a la Pi; el modo AP impide dormir |
 | Intervalo de captura | **5 minutos** (`CAPTURE_INTERVAL_MS`), deep sleep entre medio |
-| Subida | `POST` multipart a `http://<FOG_SERVER_HOST>:<FOG_SERVER_PORT>/api/v1/cameras/<DEVICE_ID>/frames` |
+| Subida | `POST` multipart a `http://<FOG_SERVER_HOST>:<FOG_SERVER_PORT><FOG_FRAMES_PATH>` — la cámara la identifica la credencial, no la URL |
 
 Todo esto vive en `config.h`, salvo las credenciales (`secrets.h`, ver §2).
 
@@ -64,12 +64,74 @@ principio a fin y termina en `esp_deep_sleep_start()`, que no retorna.
 1. Leer batería (solo para el log por serie; el endpoint no acepta ese dato).
 2. Inicializar la cámara.
 3. Conectar WiFi en modo estación, con timeout (`WIFI_CONNECT_TIMEOUT_MS`).
-4. Capturar 1 frame JPEG y subirlo por `POST` a la Pi.
+4. Capturar 1 frame JPEG y subirlo por `POST` a la Pi. El Fog responde `202`
+   al instante; la detección corre después (~20 s) y el ESP32 no la espera.
 5. Apagar la cámara (PWDN + `rtc_gpio_hold_en`), apagar WiFi, dormir
    `CAPTURE_INTERVAL_MS` y repetir.
 
 Si falla la cámara o el WiFi, el ciclo se aborta y el dispositivo duerme
 igual — no se queda colgado reintentando, que gasta batería con pilas.
+
+### El contrato con el fog node
+
+```
+POST http://parkvision.local:8000/api/v1/camera/frames
+Headers:  X-API-Key: <key de esa camara>
+          X-API-Token: <token de esa cámara>
+Body:     multipart/form-data, una sola parte:
+            name="file", filename="frame.jpg", Content-Type: image/jpeg
+```
+
+Tres detalles que el servidor exige y que el firmware ya cumple: el nombre de
+campo `file`, un `filename` en el `Content-Disposition` (si falta → `422`) y
+un `Content-Type` propio de esa parte (si falta → `415`).
+
+Junto a la imagen viajan **13 campos de telemetría** como partes de texto en
+el mismo multipart (`battery_mv`, `battery_load_mv`, `battery_valid`, `rssi`,
+`wifi_connect_ms`, `reset_reason`, `awake_ms`, `free_heap`, `fw_version`,
+`wake_count`, `wifi_fail_streak`, `framesize`, `jpeg_quality`). Van gratis:
+aprovechan una petición que ya se hace. Todos son opcionales y un valor mal
+formado no impide que se guarde la foto. Se desactivan con
+`UPLOAD_TELEMETRY_ENABLED 0`.
+
+El porcentaje de batería **no se envía a propósito**: se mandan los
+milivoltios medidos para poder recalcularlo más adelante sobre el histórico si
+se corrige la curva o la calibración.
+
+El host es un nombre `.local` y se resuelve por **mDNS** (`ESPmDNS`, incluido
+en el core). La IP resuelta se cachea en RTC memory, que sobrevive al deep
+sleep: solo el primer ciclo tras un arranque en frío paga la consulta, así que
+usar un nombre no cuesta batería en régimen normal. Si el `POST` falla por
+conexión, la caché se invalida y el siguiente ciclo vuelve a resolver — así un
+cambio de IP de la Pi se absorbe solo. Si mDNS no contesta se usa
+`FOG_SERVER_FALLBACK_IP` en vez de perder el ciclo.
+
+**La cámara no se identifica en la URL ni en el cuerpo**: el Fog la deduce de
+la pareja key/token. La respuesta lo confirma, y es la única forma de saber
+desde el dispositivo que se grabó el `secrets.h` correcto:
+
+```json
+{"frame_id": 3, "camera_id": "CAM-001", "status": "processing"}
+```
+
+El campo opcional `captured_at` **no se envía**: el ESP32 despierta del deep
+sleep sin hora válida (no hay RTC con pila ni NTP en el ciclo), así que solo
+podría mandar una marca inventada. La Pi sella la hora de llegada. Ojo: es el
+**único campo que el Fog valida de forma estricta** — mal formado devuelve
+`422` y se pierde la foto. Si algún día se añade NTP, en ISO 8601 o nada.
+
+Qué hace el firmware con cada código de error (ver `capture_and_upload()` en
+el `.ino` y los `#define UPLOAD_*` de `config.h`):
+
+| Código | Causa | Reacción |
+|---|---|---|
+| `400` | Imagen vacía | Una recaptura inmediata (`UPLOAD_RETRY_ON_EMPTY`); si vuelve a fallar, al siguiente ciclo |
+| `401` | Credencial inválida o headers ausentes | Duerme `UPLOAD_ERROR_BACKOFF_MS` (30 min): reintentar cada 5 min no lo arregla |
+| `403` | Cámara deshabilitada en el Fog | Backoff largo (puede reactivarse sola) |
+| `404` | La credencial no está dada de alta | Backoff largo; requiere intervención en la Pi |
+| `405` | URL antigua | Backoff largo; corregir `FOG_FRAMES_PATH` |
+| `415` / `422` | Multipart mal construido | Backoff largo; es un bug del firmware |
+| Timeout, DNS, `5xx` | Transitorios | Ciclo normal, se reintenta a los `CAPTURE_INTERVAL_MS` |
 
 ---
 
@@ -220,9 +282,15 @@ copy secrets.h.example secrets.h
 
 Y rellena los cinco valores: `WIFI_SSID`, `WIFI_PASSWORD`, `DEVICE_ID`,
 `API_KEY` y `API_TOKEN`. La red del router debe ser de **2,4 GHz** — el ESP32
-no ve las de 5 GHz. `DEVICE_ID`/`API_KEY`/`API_TOKEN` son distintos **para
-cada una de las 3 unidades** (`CAM-001`/`CAM-002`/`CAM-003`): confirmar cuál
-se está flasheando antes de subir el sketch.
+no ve las de 5 GHz.
+
+`API_KEY`/`API_TOKEN` son distintos **para cada una de las 3 unidades** y son
+lo único que identifica a la cámara ante el Fog: el `camera_id` ya no viaja ni
+en la URL ni en el cuerpo. Flashear `CAM-002` con la pareja de `CAM-001` no da
+ningún error — sus fotos simplemente entran en la zona equivocada. Confirmar
+cuál se está flasheando antes de subir el sketch, y verificarlo después con el
+`camera_id` que el Fog devuelve en la respuesta `202` (sale en el monitor
+serie). `DEVICE_ID` se queda solo como etiqueta local del log.
 
 #### Soporte de placas
 
@@ -283,9 +351,12 @@ completo con `CAPTURE_INTERVAL_MS` bajado a 30 s para pruebas:
 [     780] BAT: 5.98 V, 88% [ok]
 [    3120] WIFI: conectando a "ParkVisionFog1"...
 [    4380] WIFI: conectado. IP=192.168.1.42  RSSI=-58 dBm
-[    4650] UPLOAD: POST http://parkvision.local:8000/api/v1/cameras/CAM-001/frames (41230 bytes)
-[    5210] UPLOAD: respuesta HTTP 201
-[    5210] UPLOAD: ok (201)
+[    4655] BAT: minimo bajo carga 5610 mV (caida 260 mV)
+[    4648] UPLOAD: mDNS parkvision.local -> 192.168.18.157 (cacheado para los proximos ciclos)
+[    4650] UPLOAD: POST http://192.168.18.157:8000/api/v1/camera/frames (41230 bytes img + 812 bytes telemetria)
+[    5210] UPLOAD: respuesta HTTP 202
+[    5210] UPLOAD: cuerpo {"frame_id":4,"camera_id":"CAM-001","status":"processing"}
+[    5215] UPLOAD: aceptado (202)
 [    5215] CAM: sensor apagado (PWDN) y retenido para deep sleep
 [    5220] SLEEP: durmiendo 30000 ms
 ```
@@ -301,7 +372,13 @@ completo con `CAPTURE_INTERVAL_MS` bajado a 30 s para pruebas:
 | Imagen más nítida | `CAM_JPEG_QUALITY_SNAPSHOT 10`, `CAM_FRAMESIZE_SNAPSHOT FRAMESIZE_UXGA` |
 | Cámara del revés | `CAM_VFLIP 1` y/o `CAM_HMIRROR 1` |
 | IP siempre la misma | `WIFI_USE_STATIC_IP 1` + los cuatro `WIFI_STATIC_*` |
-| La Pi no resuelve por `.local` | cambiar `FOG_SERVER_HOST` por su IP directamente |
+| La Pi cambió de IP | nada: se resuelve por mDNS. Actualizar `FOG_SERVER_FALLBACK_IP` cuando puedas |
+| Prescindir de mDNS | poner una IP en `FOG_SERVER_HOST` (si no acaba en `.local`, no se resuelve nada) |
+| Dejar de mandar telemetría | `UPLOAD_TELEMETRY_ENABLED 0` |
+| Calibrar la batería sin multímetro | pilas nuevas + `BATTERY_CALIB_HELPER 1`, copiar el valor sugerido a `BATTERY_CALIBRATION` |
+| El Fog cambió la ruta de subida | `FOG_FRAMES_PATH` |
+| Que no reintente la captura tras un `400` | `UPLOAD_RETRY_ON_EMPTY 0` |
+| Otro tiempo de espera tras `401`/`403`/`404` | `UPLOAD_ERROR_BACKOFF_MS` |
 | Corregir el voltaje medido | `BATTERY_CALIBRATION` = V_multímetro / V_mostrado |
 | Otro divisor de resistencias | `BATTERY_R_TOP_OHM` / `BATTERY_R_BOTTOM_OHM` |
 | Reinicios por brownout con pilas | primero el condensador; si persiste, `POWER_DISABLE_BROWNOUT 1` |
@@ -320,8 +397,12 @@ Después de tocar `config.h`, **vuelve a subir el sketch**: es código compilado
 | `Camera probe failed` o cuelgue al arrancar | PSRAM sin habilitar en Herramientas. |
 | `WIFI: sin conexion tras ... ms` | Router fuera de rango, SSID/password mal en `secrets.h`, o red de 5 GHz (el ESP32 no la ve). |
 | `UPLOAD: fallo la conexion` | La Raspberry Pi está apagada/inalcanzable, o `FOG_SERVER_HOST`/`FOG_SERVER_PORT` no coinciden. El firmware agota el timeout y duerme igual. |
-| `UPLOAD: fallo (401)` / `(403)` | `API_KEY`/`API_TOKEN` incorrectos para ese `DEVICE_ID`, o mezclados entre cámaras. |
-| Dos cámaras compitiendo por el mismo `DEVICE_ID` | Revisar qué `secrets.h` se subió a cada unidad antes de flashear. |
+| `UPLOAD: 401 credencial rechazada` | `API_KEY`/`API_TOKEN` mal escritos en `secrets.h`. La clave compartida `dev-api-key`/`dev-api-token` ya no sirve para subir. |
+| `UPLOAD: 403 camara deshabilitada` | La cámara existe en el Fog pero está deshabilitada. El firmware duerme `UPLOAD_ERROR_BACKOFF_MS` y reintenta. |
+| `UPLOAD: 404 la credencial no corresponde…` | Esa pareja key/token no está dada de alta en el Fog. Requiere intervención en la Pi. |
+| `UPLOAD: 405 ruta equivocada` | `FOG_FRAMES_PATH` apunta a la URL antigua `/api/v1/cameras/<id>/frames`. |
+| `UPLOAD: 415` / `422` | Bug del multipart: falta el `Content-Type` o el `filename` de la parte `file`. |
+| El `camera_id` del log no es el que esperabas | Se flasheó esa unidad con el `secrets.h` de otra. Las fotos están entrando en la zona equivocada. |
 | `ADS1115 no responde en 0x48` | `ADDR` sin conectar (debe ir a GND), faltan pull-ups, o SDA/SCL intercambiados. |
 | Voltaje leído = la mitad del real | `BATTERY_R_TOP_OHM`/`BATTERY_R_BOTTOM_OHM` no coinciden con las resistencias reales. |
 | Voltaje leído 0,00 V | El divisor no tiene masa común con el ESP32. |

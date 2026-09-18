@@ -70,9 +70,15 @@ falta. Al añadir una credencial nueva, va en `secrets.h` **y** en
 **2. Sin librerías externas** salvo `HTTPClient` (core ESP32).
 
 **3. El endpoint de subida es fijo, no inventar campos.** El contrato (ver
-`config.h`, sección 3, y el documento de migración) solo acepta el campo
-`file` en un POST multipart. No añadir batería, timestamp, etc. sin confirmar
-antes con el backend.
+`config.h`, sección 3) acepta `file`, `captured_at` y **13 campos de
+telemetría acordados con el backend**. Cualquier campo nuevo se acuerda antes:
+el Fog ignora los desconocidos, así que enviar por libre no rompe nada pero
+tampoco sirve de nada.
+
+`captured_at` **no se envía a propósito**: el ESP32 despierta sin hora válida
+(no hay RTC con pila ni NTP en el ciclo) y solo podría mandar una marca
+inventada; la Pi sella la hora de llegada. Es además el **único campo que el
+Fog valida de forma estricta** — mal formado devuelve 422 y se pierde la foto.
 
 ## Hardware: restricciones que NO son obvias
 
@@ -130,14 +136,84 @@ que servir entre ciclos.
 ## Contrato de la API (Raspberry Pi / fog node)
 
 ```
-POST http://<FOG_SERVER_HOST>:<FOG_SERVER_PORT>/api/v1/cameras/<DEVICE_ID>/frames
+POST http://<FOG_SERVER_HOST>:<FOG_SERVER_PORT><FOG_FRAMES_PATH>
+     = http://parkvision.local:8000/api/v1/camera/frames
 Headers:  X-API-Key, X-API-Token
-Body:     multipart/form-data, campo "file" = JPEG
+Body:     multipart/form-data, una parte:
+            name="file", filename="frame.jpg", Content-Type: image/jpeg
+Resp:     202 {"frame_id":N,"camera_id":"CAM-00X","status":"processing"}
 ```
 
-`DEVICE_ID` va en la URL, no en el body. Es HTTP plano (red local). Si el
-ESP32 no resuelve `.local` en estación, cambiar `FOG_SERVER_HOST` por la IP
-de la Pi directamente — es un cambio de config, no de código.
+**La cámara no se identifica en la URL ni en el body**: el Fog la deduce de la
+pareja `X-API-Key`/`X-API-Token`, que es distinta para cada unidad. La ruta
+antigua `/api/v1/cameras/<id>/frames` responde 405, y la clave compartida
+`dev-api-key`/`dev-api-token` ya no sirve para subir (403). El `camera_id` de
+la respuesta 202 es la única forma de verificar desde el dispositivo que se
+grabó el `secrets.h` correcto: una unidad flasheada con las credenciales de
+otra sube a la zona equivocada sin dar ningún error.
+
+`DEVICE_ID` sobrevive en `secrets.h` solo como etiqueta local del log por
+serie; no viaja en la petición.
+
+Los tres detalles que el servidor exige en la parte `file`: nombre de campo
+`file`, `filename` en el `Content-Disposition` (si falta → 422) y su propio
+`Content-Type` (si falta → 415). El servidor hace `strip()` de los headers de
+credencial, así que un salto de línea pegado al valor no rompe la
+autenticación.
+
+La detección tarda ~20 s en la Pi y corre **después** del 202: el dispositivo
+no la espera, suelta el JPEG y se duerme.
+
+### Telemetría (13 campos, todos opcionales)
+
+Van como partes de texto en el **mismo** multipart de la imagen: aprovechan
+una petición que ya se hace. Un endpoint aparte costaría ~6 mAh/día de radio
+extra, un 5-7 % del presupuesto de batería.
+
+| Campo | Origen |
+|---|---|
+| `battery_mv` | Pack en reposo al despertar |
+| `battery_load_mv` | Mínimo durante la asociación WiFi (`battery_sample_min_mv()`) |
+| `battery_valid` | `false` si el ADS1115 no respondió |
+| `rssi`, `wifi_connect_ms` | Medidos en `wifi_connect()` |
+| `reset_reason` | `esp_reset_reason()`: 8 = deep sleep, 9 = brownout |
+| `awake_ms`, `free_heap` | Justo antes del POST |
+| `fw_version` | `FW_VERSION` en `config.h` |
+| `wake_count`, `wifi_fail_streak` | Contadores en `RTC_DATA_ATTR` |
+| `framesize`, `jpeg_quality` | Configuración de la cámara |
+
+**No se envían** `battery_percent` ni `battery_state` (son conclusiones
+derivadas de una curva que ya estuvo equivocada una vez y de un
+`BATTERY_CALIBRATION` sin ajustar: guardar mV permite recalcular el porcentaje
+sobre el histórico sin reflashear), ni `battery_sag_mv` ni `frame_len`, que el
+Fog calcula al recibir.
+
+Reglas que el backend garantiza: todos opcionales; un valor mal formado se
+descarta con warning y el fotograma se guarda igual con 202; enteros, no
+floats; campos desconocidos ignorados.
+
+Consulta: `GET /api/v1/cameras/{camera_id}/telemetry?limit=N` (rol admin).
+
+### Manejo de errores
+
+Manejo de errores en `capture_and_upload()` (en el `.ino`): un `400` provoca
+una recaptura inmediata (`UPLOAD_RETRY_ON_EMPTY`); `401`/`403`/`404`/`405`/
+`415`/`422` duermen `UPLOAD_ERROR_BACKOFF_MS` (30 min) en vez del intervalo
+normal, porque reintentar cada 5 min no los arregla y gasta pilas; lo demás
+(timeout, DNS, 5xx) se reintenta en el ciclo siguiente.
+
+Es HTTP plano (red local).
+
+**El host es un nombre `.local`, resuelto por mDNS** (`ESPmDNS`, incluido en el
+core — no rompe la regla de "sin librerías externas"). La IP resuelta se cachea
+en `RTC_DATA_ATTR`, así que solo el primer ciclo tras un arranque en frío paga
+la consulta: usar un nombre no cuesta batería en régimen normal. Cuando el POST
+falla por conexión (`code < 0`), `upload_forget_host()` invalida la caché y el
+siguiente ciclo vuelve a resolver, que es como se absorbe solo un cambio de IP
+de la Pi. Si mDNS no contesta se usa `FOG_SERVER_FALLBACK_IP`.
+
+Si `FOG_SERVER_HOST` no termina en `.local` se usa tal cual y no se resuelve
+nada: volver a una IP fija es cambiar esa línea.
 
 ## Migración (contexto histórico)
 

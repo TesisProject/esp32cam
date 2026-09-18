@@ -34,3 +34,6 @@ uint32_t camera_last_use_ms();
 
 /* Nombre legible de la resolucion activa, para el log por serie. */
 const char *camera_resolution_name();
+
+/* Nombre simbolico (SVGA, UXGA...) para el campo framesize de la telemetria. */
+const char *camera_framesize_name();

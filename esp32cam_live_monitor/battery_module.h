@@ -29,6 +29,14 @@ bool battery_init();
  * force=true mide ya mismo. Devuelve true si ha hecho una medida nueva. */
 bool battery_update(bool force = false);
 
+/* Minimo de tension del pack (en mV) durante una ventana de window_ms,
+ * muestreando lo mas rapido que da el ADS1115. Pensada para llamarse mientras
+ * el WiFi transmite: la caida respecto a la medida en reposo es proporcional
+ * a la resistencia interna, que es el predictor real de fin de vida.
+ *
+ * Bloquea window_ms. Devuelve 0 si no hubo ninguna lectura valida. */
+uint32_t battery_sample_min_mv(uint32_t window_ms);
+
 /* Ultimo estado conocido (no bloquea, no toca el I2C). */
 BatteryReading battery_get();
 

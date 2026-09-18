@@ -19,6 +19,11 @@
 #define DEVICE_NAME            "ESP32-CAM ParkVision"
 #define DEVICE_HOSTNAME        "esp32cam"      // nombre visible en el router
 
+/* Version del firmware. Viaja en la telemetria (campo fw_version): con 3
+ * unidades en campo es la unica forma de saber cual lleva que codigo sin ir
+ * a leer el monitor serie de cada una. Subirla al cambiar el comportamiento. */
+#define FW_VERSION             "1.1.0"
+
 /* ===========================================================================
  * 2. WIFI  (solo modo estacion: un AP propio impediria dormir la radio)
  * ==========================================================================*/
@@ -69,13 +74,76 @@
  * ==========================================================================*/
 #define FOG_SERVER_HOST         "parkvision.local"
 #define FOG_SERVER_PORT         8000
-// Endpoint final construido en tiempo de ejecucion:
-//   http://<FOG_SERVER_HOST>:<FOG_SERVER_PORT>/api/v1/cameras/<DEVICE_ID>/frames
-//
-// Si el ESP32 no logra resolver ".local" en estacion, cambiar FOG_SERVER_HOST
-// por la IP de la Pi directamente (p. ej. "192.168.1.20").
+#define FOG_FRAMES_PATH         "/api/v1/camera/frames"
 
-#define CAPTURE_INTERVAL_MS     30000UL    // 30 segundos entre capturas (deep sleep)
+// Endpoint final:  http://<FOG_SERVER_HOST>:<FOG_SERVER_PORT><FOG_FRAMES_PATH>
+//
+// La camara NO se identifica en la URL ni en el cuerpo: el Fog la deduce de
+// la pareja X-API-Key / X-API-Token que lleva cada unidad en su secrets.h, y
+// devuelve el camera_id en la respuesta 202. La ruta antigua con el id dentro
+// (/api/v1/cameras/<id>/frames) responde 405.
+
+/* --- Resolucion del nombre ------------------------------------------------
+ *  Un nombre .local sobrevive a que la Pi cambie de IP; una IP fija habria que
+ *  ir a cambiarla a mano en las tres camaras. Por eso el host es un nombre.
+ *
+ *  El coste es que resolverlo cuesta radio encendida, y con pilas eso importa.
+ *  De ahi las dos salvaguardas:
+ *
+ *  1. La IP resuelta se CACHEA en RTC memory, que sobrevive al deep sleep.
+ *     Solo el primer ciclo tras un arranque en frio paga la consulta mDNS; los
+ *     demas van directos a la IP. Si el POST falla por conexion, la cache se
+ *     invalida y el ciclo siguiente vuelve a resolver: asi un cambio de IP de
+ *     la Pi se arregla solo, sin tocar el firmware.
+ *
+ *  2. Si mDNS no contesta, se usa FOG_SERVER_FALLBACK_IP en vez de perder el
+ *     ciclo entero. Manten aqui la ultima IP conocida de la Pi.
+ *
+ *  ESPmDNS viene con el core ESP32: no hay que instalar ninguna libreria.
+ *
+ *  Si FOG_SERVER_HOST no acaba en ".local" se usa tal cual y no se resuelve
+ *  nada: poner una IP ahi arriba sigue funcionando y salta todo este camino. */
+#define FOG_MDNS_ENABLED        1
+#define FOG_MDNS_TIMEOUT_MS     2000
+#define FOG_SERVER_FALLBACK_IP  "192.168.18.157"
+
+/* Respuesta esperada: 202 Accepted con {"frame_id":N,"camera_id":"CAM-00X",
+ * "status":"processing"}. La deteccion tarda ~20 s en la Pi y corre despues:
+ * el dispositivo NO la espera, suelta el JPEG y se duerme. */
+#define UPLOAD_ACCEPTED_CODE    202
+
+/* Reintento inmediato solo para el 400 ("imagen vacia"): el fallo esta en el
+ * frame, no en la red, asi que se descarta y se captura otro. Uno como mucho:
+ * cada intento son ~0.5 s de radio encendida. 0 = nunca reintentar. */
+#define UPLOAD_RETRY_ON_EMPTY   1
+
+/* Errores de credencial o de alta (401 / 403 / 404): reintentar cada 5 min no
+ * los arregla, solo gasta pilas. Se duerme este tiempo mas largo en su lugar.
+ * El 403 (camara deshabilitada en el Fog) si puede resolverse solo, de ahi que
+ * no se apague del todo el dispositivo. */
+#define UPLOAD_ERROR_BACKOFF_MS 1800000UL   // 30 min
+
+/* Tiempo en deep sleep entre capturas. 5 min es el valor de campo.
+ * Para probar sin esperar, bajarlo a 30000UL (30 s) y VOLVER A SUBIRLO antes
+ * de dejar la camara desatendida: a 30 s son 120 ciclos/hora en vez de 12. */
+#define CAPTURE_INTERVAL_MS     300000UL   // 5 minutos entre capturas
+
+/* --- Telemetria en el POST ------------------------------------------------
+ *  El Fog acepta 13 campos de texto opcionales junto a la imagen, en el mismo
+ *  multipart. Van gratis: aprovechan una peticion que ya se hace de todas
+ *  formas. Un endpoint aparte costaria ~6 mAh/dia de radio extra.
+ *
+ *  El contrato acordado con el backend:
+ *    - Todos opcionales. Si no hay dato, el campo no se envia (nunca vacio).
+ *    - Enteros, no floats: milivoltios y milisegundos.
+ *    - Un campo mal formado se descarta con warning; la imagen se guarda igual.
+ *    - Campos desconocidos se ignoran: se puede ampliar sin tocar el backend.
+ *
+ *  Deliberadamente NO se envian battery_percent ni battery_state (son
+ *  conclusiones derivadas de una curva que puede estar mal), ni frame_len ni
+ *  battery_sag_mv (los calcula el Fog al recibir). Ver el documento de
+ *  telemetria para el razonamiento completo.                                */
+#define UPLOAD_TELEMETRY_ENABLED 1
 
 /* ===========================================================================
  * 4. LED DE ESTADO  -  rojo integrado en GPIO33
@@ -209,11 +277,60 @@
 #define BATTERY_R_TOP_OHM      220000.0f
 #define BATTERY_R_BOTTOM_OHM   100000.0f
 
-/* Correccion fina: mide con un multimetro y ajusta.
- *   calib = V_real / V_leido                                               */
+/* Correccion fina del divisor resistivo.
+ *
+ *  El ADS1115 no es el problema: lleva referencia interna y su error de
+ *  ganancia es del 0.1%. Lo que hay que corregir es la TOLERANCIA DE LAS
+ *  RESISTENCIAS: con un 5% el factor 3.2 puede irse un +-7%, y es un error
+ *  multiplicativo fijo, asi que un solo punto de referencia lo elimina casi
+ *  entero.
+ *
+ *    calib = V_real / V_leido
+ *
+ *  Con multimetro: mides el pack y divides. Sin multimetro, sirve un pack
+ *  RECIEN COMPRADO como referencia (ver BATTERY_CALIB_HELPER).            */
 #define BATTERY_CALIBRATION    1.000f
 
+/* Ayuda de calibracion sin multimetro.
+ *
+ *  Con 1, cada lectura imprime por serie que valor deberia tener
+ *  BATTERY_CALIBRATION *si el pack que hay puesto estuviera recien estrenado*,
+ *  tomando como referencia BATTERY_VOLT_FULL (tension en circuito abierto de
+ *  una celda nueva x el numero de celdas).
+ *
+ *  Como usarlo:
+ *    1. Pack nuevo, en reposo, sin haber transmitido todavia.
+ *    2. Lee la linea "BATTERY_CALIBRATION sugerido" del monitor serie.
+ *    3. Copia ese numero aqui arriba y vuelve a subir el sketch.
+ *    4. Pon este flag a 0 cuando ya no lo necesites.
+ *
+ *  Precision: la referencia arrastra la dispersion de la propia pila
+ *  (+-0.03 V/celda), asi que quedas en un error de ~3% en vez del ~8% de
+ *  partida. No es calibracion de laboratorio, pero es mucho mejor que 1.000.
+ *
+ *  OJO: si el valor sugerido se aleja mucho de 1 (por debajo de 0.7 o por
+ *  encima de 1.4) NO lo copies: eso no es tolerancia, es que BATTERY_R_TOP_OHM
+ *  /BATTERY_R_BOTTOM_OHM no coinciden con las resistencias soldadas. Calibrar
+ *  ahi taparia el error de verdad.                                         */
+#define BATTERY_CALIB_HELPER   1
+
 /* Muestreo y filtrado */
+/* --- Medida bajo carga ----------------------------------------------------
+ *  La tension en reposo engana: el pack lleva 5 min descansando y se ha
+ *  recuperado. Lo que de verdad predice el fin de vida es cuanto se HUNDE
+ *  durante un pico de TX del WiFi, porque esa caida es proporcional a la
+ *  resistencia interna, que sube de forma monotona y no se recupera.
+ *
+ *  Se muestrea buscando el MINIMO mientras el WiFi se asocia (es cuando la
+ *  radio transmite a plena potencia), no durante el POST: http.POST() es
+ *  bloqueante y no deja hueco para leer el I2C sin montar una tarea aparte.
+ *
+ *  El ADS1115 se pone al maximo (860 SPS, 1.16 ms por conversion) solo para
+ *  esto: a los 128 SPS normales cada conversion promedia 7.8 ms y se comeria
+ *  el pico, que dura 1-2 ms.                                                */
+#define BATTERY_LOAD_SAMPLING   1
+#define BATTERY_LOAD_DATA_RATE  7        // 860 SPS, el mas rapido del chip
+
 #define BATTERY_SAMPLES        8        // lecturas promediadas por medida
 #define BATTERY_SAMPLE_DELAY_MS 5
 #define BATTERY_READ_INTERVAL_MS 5000UL // cada cuanto relee el firmware

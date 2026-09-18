@@ -215,3 +215,26 @@ const char *camera_resolution_name() {
     default:              return "?";
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Nombre simbolico de la resolucion (SVGA, UXGA...)
+ *
+ *  Va en la telemetria como campo framesize. Se manda el nombre simbolico y
+ *  no "800x600" porque es el formato que espera el Fog.
+ * -------------------------------------------------------------------------*/
+const char *camera_framesize_name() {
+  sensor_t *s = esp_camera_sensor_get();
+  if (!s) return "unknown";
+
+  switch (s->status.framesize) {
+    case FRAMESIZE_QQVGA: return "QQVGA";
+    case FRAMESIZE_QVGA:  return "QVGA";
+    case FRAMESIZE_CIF:   return "CIF";
+    case FRAMESIZE_VGA:   return "VGA";
+    case FRAMESIZE_SVGA:  return "SVGA";
+    case FRAMESIZE_XGA:   return "XGA";
+    case FRAMESIZE_SXGA:  return "SXGA";
+    case FRAMESIZE_UXGA:  return "UXGA";
+    default:              return "unknown";
+  }
+}
