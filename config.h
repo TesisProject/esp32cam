@@ -1,9 +1,16 @@
 /* ============================================================================
- *  config.h  -  CONFIGURACION CENTRAL DEL PROYECTO
- *  ESP32-CAM Live Monitor (AI-Thinker)  -  version Arduino IDE
+ *  config.h  -  CONFIGURACION CENTRAL DEL PROYECTO (valores por defecto)
+ *  ESP32-CAM ParkVision (AI-Thinker)  -  version Arduino IDE
  *
- *  TODO lo configurable vive aqui. Ningun otro fichero contiene valores
- *  hardcodeados: ni credenciales, ni pines, ni umbrales, ni intervalos.
+ *  TODA constante del firmware vive aqui. Ningun otro fichero contiene
+ *  valores hardcodeados: ni pines, ni umbrales, ni intervalos.
+ *
+ *  Pero lo que es propio de cada placa o de cada despliegue (WiFi, host del
+ *  Fog y, mas adelante, credencial y parametros de captura) NO se compila:
+ *  vive en la NVS de la placa (ver src/settings/), se graba una vez por USB
+ *  (scripts/provision.ps1) y la nube lo actualizara via el Fog. Lo que aqui
+ *  aparezca para esos datos es solo el valor por defecto cuando la NVS no
+ *  tiene uno: un mismo .bin sirve para todas las placas.
  *
  *  Este sketch no usa ninguna libreria externa: solo el core ESP32 de
  *  Espressif.
@@ -29,16 +36,19 @@
 /* ===========================================================================
  * 2. WIFI  (solo modo estacion: un AP propio impediria dormir la radio)
  * ==========================================================================*/
-/* --- Credenciales: EXCEPCION a la regla de "todo en config.h" ------------
+/* --- Red WiFi: en la NVS, NO aqui ----------------------------------------
  *
- *  El SSID/password del router y las credenciales de esta camara (DEVICE_ID,
- *  API_KEY, API_TOKEN) viven en secrets.h, que git NO versiona. Asi se puede
- *  publicar el repositorio sin regalar el WiFi ni las claves de la API.
+ *  El SSID y la contrasena se graban por USB en la NVS de cada placa
+ *  (seccion 8 y scripts/provision.ps1). No estan en el binario: el mismo
+ *  .bin sirve para cualquier red, y publicar el repo no regala el WiFi.
  *
- *  Es la unica configuracion que no esta en este fichero, y es a proposito.
+ * --- Credenciales de la camara: secrets.h (provisional, hasta E7) --------
+ *
+ *  DEVICE_ID, API_KEY y API_TOKEN siguen en secrets.h, que git NO versiona,
+ *  hasta que la camara las obtenga sola con el alta por MAC.
  *
  *  Si acabas de clonar el repositorio:
- *      copy secrets.h.example secrets.h      (y rellena los cinco valores)
+ *      copy secrets.h.example secrets.h      (y rellena los tres valores)
  * ------------------------------------------------------------------------*/
 #if defined(__has_include)
   #if __has_include("secrets.h")
@@ -48,9 +58,27 @@
   #include "secrets.h"
 #endif
 
-#if !defined(WIFI_SSID) || !defined(WIFI_PASSWORD) ||     !defined(DEVICE_ID) || !defined(API_KEY) || !defined(API_TOKEN)
-  #error "Falta secrets.h (o le faltan valores). Copia secrets.h.example a secrets.h y rellena WIFI_SSID, WIFI_PASSWORD, DEVICE_ID, API_KEY y API_TOKEN."
+#if !defined(DEVICE_ID) || !defined(API_KEY) || !defined(API_TOKEN)
+  #error "Falta secrets.h (o le faltan valores). Copia secrets.h.example a secrets.h y rellena DEVICE_ID, API_KEY y API_TOKEN."
 #endif
+
+/* Un secrets.h antiguo puede traer aun WIFI_SSID/WIFI_PASSWORD. Se anulan
+ * para que ningun codigo vuelva a usarlos por descuido (no compilaria) y no
+ * acaben dentro del .bin. Borralos de tu secrets.h: ya no hacen nada. */
+#ifdef WIFI_SSID
+  #undef WIFI_SSID
+#endif
+#ifdef WIFI_PASSWORD
+  #undef WIFI_PASSWORD
+#endif
+
+/* Limites de la red que se aceptan al aprovisionar (802.11 / WPA2-PSK):
+ * SSID de 1 a 32 bytes; contrasena WPA2 de 8 a 63 caracteres. Las redes
+ * abiertas (sin contrasena) se rechazan a proposito: lo decidio el proyecto
+ * para toda la configuracion WiFi, tambien en la nube. */
+#define WIFI_SSID_MAX_LEN         32
+#define WIFI_PASS_MIN_LEN         8
+#define WIFI_PASS_MAX_LEN         63
 
 #define WIFI_CONNECT_TIMEOUT_MS   20000UL   // espera maxima al conectar; si no
                                             // conecta en este tiempo, se aborta
@@ -74,11 +102,18 @@
  *  procesa las imagenes (deteccion de plazas de parking) y las reenvia como
  *  JSON a la nube; el firmware no sabe nada de eso, solo manda el JPEG.
  * ==========================================================================*/
-#define FOG_SERVER_HOST         "parkvision.local"
-#define FOG_SERVER_PORT         8000
+/* Host y puerto del Fog: VALORES POR DEFECTO. Los reales se graban por USB
+ * en la NVS (fogHost/fogPort del JSON de aprovisionamiento) y mandan sobre
+ * estos. Cambiar esto NO afecta a una placa ya aprovisionada con host.
+ * El host no se actualiza desde la nube a proposito: si llegara uno
+ * equivocado, la camara ya no podria recibir la correccion.
+ * El defecto es un nombre generico, no un secreto ni una IP concreta. */
+#define FOG_SERVER_HOST_DEFAULT "parkvision.local"
+#define FOG_SERVER_PORT_DEFAULT 8000
+#define FOG_HOST_MAX_LEN        63     // nombre o IP; mas largo = error al aprovisionar
 #define FOG_FRAMES_PATH         "/api/v1/camera/frames"
 // Endpoint final construido en tiempo de ejecucion:
-//   http://<FOG_SERVER_HOST>:<FOG_SERVER_PORT>/api/v1/camera/frames
+//   http://<host de la NVS o defecto>:<puerto>/api/v1/camera/frames
 //
 // "camera" en singular y SIN id: el Fog sabe que camara es a partir de
 // X-API-Key/X-API-Token (fog-application/src/vision/camera_router.py).
@@ -86,8 +121,8 @@
 // administracion: un POST ahi recibe 405. Responde 202 Accepted (la
 // deteccion se procesa despues de responder), no 201.
 //
-// Si el ESP32 no logra resolver ".local" en estacion, cambiar FOG_SERVER_HOST
-// por la IP de la Pi directamente (p. ej. "192.168.1.20").
+// Si el ESP32 no logra resolver ".local" en estacion, aprovisionar la placa
+// con la IP de la Pi en fogHost (p. ej. "192.168.1.20").
 
 #define CAPTURE_INTERVAL_MS     30000UL    // 30 segundos entre capturas (deep sleep)
 
@@ -177,7 +212,54 @@
 #define POWER_DISABLE_BROWNOUT     0
 
 /* ===========================================================================
- * 7. DEPURACION
+ * 7. ALMACEN EN NVS  -  la configuracion propia de cada placa
+ *
+ *  src/settings/settings_module.* es la UNICA puerta a la NVS. El esquema
+ *  completo (WiFi activa y pendiente, Fog, credencial, captura, revision,
+ *  OTA rechazada) existe desde E6 aunque de momento solo se usen WiFi y Fog.
+ *  Tamanos maximos de lo que se guarda: fijan el tamano de los blobs, asi
+ *  que cambiarlos invalida lo ya guardado (ver SETTINGS_SCHEMA_VERSION).
+ * ==========================================================================*/
+#define SETTINGS_NVS_NAMESPACE     "parkvision"   // max. 15 caracteres (limite NVS)
+#define SETTINGS_SCHEMA_VERSION    1    // subirlo si cambia la forma de un blob:
+                                        // la NVS antigua se borra al arrancar en
+                                        // vez de leer basura
+
+#define CAM_CODE_MAX_LEN           15   // "CAM-001"
+#define API_SECRET_MAX_LEN         63   // X-API-Key / X-API-Token del Fog
+#define CAP_FRAMESIZE_MAX_LEN      7    // "SVGA", "QVGA"... (nombre del enum)
+
+/* ===========================================================================
+ * 8. APROVISIONAMIENTO POR USB  -  una vez por placa
+ *
+ *  Sin WiFi en la NVS la placa no puede hacer nada util: espera por serie
+ *  una linea JSON (contrato C, la envia scripts/provision.ps1)
+ *      {"wifi":{"ssid":"...","password":"..."},"fogHost":"...","fogPort":8000}
+ *  la valida, la guarda y reinicia. Si no llega en PROV_WAIT_MS, duerme
+ *  PROV_RETRY_SLEEP_MS y lo vuelve a intentar: en campo, sin USB, esperar
+ *  indefinidamente agotaria las pilas.
+ *
+ *  Coste de una placa sin aprovisionar en campo: ~60 s despierta (~40 mA,
+ *  sin radio) cada hora = ~0,7 mAh por hora. Es un estado de error, no de
+ *  funcionamiento, pero las pilas duran semanas, no horas.
+ *
+ *  Re-aprovisionar: SOLO tras un arranque en frio (encendido, boton RST,
+ *  pulso RTS del script), nunca al despertar del deep sleep, se abre una
+ *  ventana de PROV_WINDOW_MS que acepta la misma linea o {"cmd":"erase"}.
+ *  Los ciclos normales no la pagan.
+ * ==========================================================================*/
+#define PROV_WAIT_MS               60000UL     // NVS sin WiFi: espera de la linea
+#define PROV_RETRY_SLEEP_MS        3600000UL   // y si no llega, 1 h de deep sleep
+#define PROV_WINDOW_MS             3000UL      // arranque en frio ya aprovisionado.
+                                               // El script envia en cuanto ve
+                                               // "PROV: READY", asi que 3 s sobran
+#define PROV_LINE_MAX_LEN          512         // la linea completa ocupa ~200 B
+#define PROV_SERIAL_RX_BUFFER      1024        // buffer RX de la UART (256 por
+                                               // defecto: justo para una linea
+                                               // con caracteres escapados)
+
+/* ===========================================================================
+ * 9. DEPURACION
  * ==========================================================================*/
 #define SERIAL_BAUD            115200
 #define DEBUG_ENABLED          1

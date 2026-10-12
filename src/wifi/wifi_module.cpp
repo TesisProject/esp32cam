@@ -15,7 +15,15 @@
  * saturado, DHCP lento), y por eso se reporta al Fog como wifi_connect_ms. */
 static uint32_t s_connect_ms = 0;
 
-bool wifi_connect() {
+/* Si el ciclo se aborta antes de conectar (camara rota, placa sin
+ * aprovisionar), el driver WiFi ni siquiera se ha iniciado: no hay nada que
+ * apagar y llamar a WiFi.disconnect() solo ensuciaria el log. */
+static bool s_started = false;
+
+bool wifi_connect(const char *ssid, const char *password) {
+  s_started = true;
+  /* persistent(false): el driver no copia SSID/contrasena en su propia NVS.
+   * La unica copia es la de settings_module, y "borrar la NVS" la elimina. */
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(DEVICE_HOSTNAME);
@@ -41,8 +49,8 @@ bool wifi_connect() {
    * tension en el pack. Si el router queda lejos, subelo en config.h. */
   WiFi.setTxPower((wifi_power_t)(WIFI_TX_POWER_DBM * 4));
 
-  LOG("WIFI: conectando a \"%s\"...", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  LOG("WIFI: conectando a \"%s\"...", ssid);
+  WiFi.begin(ssid, password);
 
   const uint32_t started = millis();
   while (WiFi.status() != WL_CONNECTED &&
@@ -74,6 +82,7 @@ uint32_t wifi_connect_ms() { return s_connect_ms; }
 int wifi_rssi() { return (int)WiFi.RSSI(); }
 
 void wifi_off() {
+  if (!s_started) return;
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
 }

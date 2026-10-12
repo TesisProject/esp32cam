@@ -3,6 +3,8 @@
  *  Proyecto de tesis UPC "ParkVision"
  *
  *  Cada despertar del deep sleep ejecuta un ciclo completo dentro de setup():
+ *    0. Leer la configuracion de la placa de la NVS (WiFi, Fog). Si no hay
+ *       WiFi, modo aprovisionamiento por USB y nada mas (ver abajo).
  *    1. Inicializar la camara.
  *    2. Conectar WiFi en modo estacion (con timeout: sin red no hay nada que
  *       subir, no vale la pena reintentar indefinidamente y gastar bateria).
@@ -15,6 +17,13 @@
  *  Junto a la foto viaja la telemetria del ciclo (UploadTelemetry). Si la
  *  imagen en ejecucion viene de un OTA y aun no esta confirmada, solo se
  *  confirma tras una subida 2xx (rollback, ver ota_module.cpp).
+ *
+ *  Aprovisionamiento (src/provision/, scripts/provision.ps1):
+ *    - NVS sin WiFi: se espera la linea JSON por serie PROV_WAIT_MS; si no
+ *      llega, deep sleep PROV_RETRY_SLEEP_MS (sin USB no hay quien la mande).
+ *    - Ya aprovisionada y arranque en frio (encendido / RST / pulso RTS del
+ *      script): ventana corta PROV_WINDOW_MS para reescribir o borrar.
+ *    - Despertar de deep sleep: ninguna espera. Los ciclos normales no pagan.
  *
  *  No hay loop() real: no queda nada despues de esp_deep_sleep_start().
  *
@@ -32,6 +41,8 @@
 #include "src/wifi/wifi_module.h"
 #include "src/upload/upload_module.h"
 #include "src/ota/ota_module.h"
+#include "src/settings/settings_module.h"
+#include "src/provision/provision_module.h"
 
 /* ===========================================================================
  * Estado entre ciclos (memoria RTC lenta)
@@ -54,7 +65,7 @@ RTC_DATA_ATTR static uint32_t s_wifi_fail_streak = 0;
 /* ===========================================================================
  * Apagado y deep sleep
  * ==========================================================================*/
-static void go_to_sleep() {
+static void go_to_sleep(uint32_t sleep_ms = CAPTURE_INTERVAL_MS) {
   camera_power_down();   // PWDN + rtc_gpio_hold_en: retiene el pin dormido
   wifi_off();
 
@@ -62,10 +73,10 @@ static void go_to_sleep() {
   digitalWrite(STATUS_LED_PIN, STATUS_LED_ACTIVE_LOW ? HIGH : LOW);   // apagado
 #endif
 
-  LOG("SLEEP: durmiendo %lu ms", (unsigned long)CAPTURE_INTERVAL_MS);
+  LOG("SLEEP: durmiendo %lu ms", (unsigned long)sleep_ms);
   Serial.flush();
 
-  esp_sleep_enable_timer_wakeup((uint64_t)CAPTURE_INTERVAL_MS * 1000ULL);
+  esp_sleep_enable_timer_wakeup((uint64_t)sleep_ms * 1000ULL);
   esp_deep_sleep_start();
 }
 
@@ -73,6 +84,9 @@ static void go_to_sleep() {
  * setup  -  un ciclo completo por cada despertar
  * ==========================================================================*/
 void setup() {
+  /* Antes de begin(): el buffer RX solo se puede fijar ahi. La linea de
+   * aprovisionamiento puede pasar de los 256 B por defecto si va escapada. */
+  Serial.setRxBufferSize(PROV_SERIAL_RX_BUFFER);
   Serial.begin(SERIAL_BAUD);
   delay(200);
   Serial.println();
@@ -107,6 +121,32 @@ void setup() {
 
   setCpuFrequencyMhz(POWER_CPU_FREQ_ACTIVE_MHZ);
 
+  /* --- Configuracion de la placa (NVS) y aprovisionamiento -------------------
+   * Antes que la camara: si no hay WiFi no se va a subir nada, y arrancar el
+   * sensor solo gastaria. */
+  settings_begin();
+  if (!settings_has_wifi()) {
+    LOG("PROV: la NVS no tiene WiFi: modo aprovisionamiento");
+    provision_listen(PROV_WAIT_MS, true);   // con una linea valida reinicia
+    LOG("PROV: no llego configuracion en %lu ms", (unsigned long)PROV_WAIT_MS);
+    go_to_sleep(PROV_RETRY_SLEEP_MS);
+  }
+  /* Solo ESP_RST_POWERON (encendido, boton RST o pulso RTS del script): es
+   * el unico arranque en el que puede haber alguien al otro lado del USB.
+   * Ni el despertar del deep sleep ni un brownout/cuelgue en campo abren la
+   * ventana, asi que no alarga ningun ciclo normal. Tampoco ESP_RST_SW, que
+   * es el reinicio que sigue a un aprovisionamiento correcto. */
+  if (reset_reason == ESP_RST_POWERON) {
+    provision_listen(PROV_WINDOW_MS, false);
+  }
+
+  SettingsWifi wifi;
+  settings_get_wifi(wifi);
+  SettingsFog fog;
+  const bool fog_from_nvs = settings_get_fog(fog);
+  LOG("NVS: wifi=\"%s\"  fog=%s:%u (%s)", wifi.ssid, fog.host, (unsigned)fog.port,
+      fog_from_nvs ? "NVS" : "defecto de config.h");
+
   /* --- Camara --------------------------------------------------------------*/
   if (!camera_init()) {
     LOG("FATAL: la camara no arranca. Se aborta el ciclo y se duerme igual.");
@@ -114,7 +154,9 @@ void setup() {
   }
 
   /* --- WiFi ------------------------------------------------------------------*/
-  if (!wifi_connect()) {
+  const bool connected = wifi_connect(wifi.ssid, wifi.password);
+  memset(wifi.password, 0, sizeof(wifi.password));   // ya no hace falta en RAM
+  if (!connected) {
     s_wifi_fail_streak++;
     go_to_sleep();
   }
@@ -142,7 +184,7 @@ void setup() {
      * cota inferior, comparable entre ciclos, no el consumo exacto. */
     t.awake_ms         = millis();
 
-    const int code = upload_frame(fb, &t);
+    const int code = upload_frame(fog.host, fog.port, fb, &t);
     if (code >= 200 && code < 300) {
       LOG("UPLOAD: ok (%d)", code);
       /* Unico punto donde se da por buena una imagen nueva: WiFi conectado y

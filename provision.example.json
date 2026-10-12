@@ -1,0 +1,5 @@
+{
+  "wifi": { "ssid": "ParkVisionFog1", "password": "CAMBIAR-por-la-real" },
+  "fogHost": "192.168.1.20",
+  "fogPort": 8000
+}

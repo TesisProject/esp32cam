@@ -163,7 +163,11 @@ void camera_flash(bool on) {
  * -------------------------------------------------------------------------*/
 void camera_power_down() {
 #if CAM_PIN_PWDN >= 0
-  if (!s_ready || !s_powered) return;
+  /* Sin camera_init() (placa sin aprovisionar, o init fallido) el sensor
+   * sigue alimentado y PWDN queda como entrada sin nivel definido: tambien
+   * hay que apagarlo, o una placa que reintenta aprovisionar cada hora en
+   * campo dormiria con la camara encendida. Solo se salta si ya esta apagado. */
+  if (s_ready && !s_powered) return;
   pinMode(CAM_PIN_PWDN, OUTPUT);
   digitalWrite(CAM_PIN_PWDN, HIGH);
 

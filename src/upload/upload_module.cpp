@@ -102,7 +102,12 @@ static size_t build_telemetry(const UploadTelemetry &t) {
   return len;
 }
 
-int upload_frame(camera_fb_t *fb, const UploadTelemetry *telemetry) {
+int upload_frame(const char *fog_host, uint16_t fog_port,
+                 camera_fb_t *fb, const UploadTelemetry *telemetry) {
+  if (!fog_host || fog_host[0] == '\0' || fog_port == 0) {
+    LOG("UPLOAD: sin host/puerto del Fog, no se sube");
+    return -1;
+  }
   if (!fb || !fb->buf || fb->len == 0) {
     LOG("UPLOAD: frame invalido, no se sube");
     return -1;
@@ -149,8 +154,8 @@ int upload_frame(camera_fb_t *fb, const UploadTelemetry *telemetry) {
 
   /* Sin DEVICE_ID en la URL: el Fog identifica la camara por la credencial
    * (X-API-Key + X-API-Token), asi una camara no puede subir frames a otra. */
-  const String url = String("http://") + FOG_SERVER_HOST + ":" + FOG_SERVER_PORT +
-                      FOG_FRAMES_PATH;
+  const String url = String("http://") + fog_host + ":" + (unsigned)fog_port +
+                     FOG_FRAMES_PATH;
 
   HTTPClient http;
   http.begin(url);
