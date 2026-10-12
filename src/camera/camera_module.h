@@ -34,3 +34,8 @@ uint32_t camera_last_use_ms();
 
 /* Nombre legible de la resolucion activa, para el log por serie. */
 const char *camera_resolution_name();
+
+/* Resolucion (nombre del enum: "SVGA", "QVGA"...) y calidad JPEG aplicadas
+ * de verdad, ya degradadas si no hay PSRAM. Para la telemetria del POST. */
+const char *camera_framesize_name();
+int camera_jpeg_quality();

@@ -2,13 +2,19 @@
  *  camera_module.cpp  -  Sensor OV2640 de la ESP32-CAM AI-Thinker
  * ==========================================================================*/
 #include "camera_module.h"
-#include "config.h"
+#include "../../config.h"
 
 #include "driver/rtc_io.h"
 
 static bool          s_ready         = false;
 static bool          s_powered       = false;
 static uint32_t      s_last_use_ms   = 0;
+
+/* Resolucion y calidad aplicadas de verdad (las de config.h o las degradadas
+ * si no hay PSRAM). Se guardan aqui porque son las que hay que reaplicar al
+ * volver de PWDN y las que se reportan al Fog como telemetria. */
+static framesize_t   s_framesize     = CAM_FRAMESIZE_SNAPSHOT;
+static int           s_jpeg_quality  = CAM_JPEG_QUALITY_SNAPSHOT;
 
 /* ---------------------------------------------------------------------------
  * Ajustes del sensor que se aplican siempre, al iniciar y al volver de PWDN.
@@ -70,18 +76,21 @@ bool camera_init() {
   /* Se inicializa con el perfil mas grande (snapshot) para que el driver
    * reserve buffers suficientes; bajar de resolucion despues es gratis. */
   if (psramFound()) {
-    cfg.frame_size   = CAM_FRAMESIZE_SNAPSHOT;
-    cfg.jpeg_quality = CAM_JPEG_QUALITY_SNAPSHOT;
+    s_framesize      = CAM_FRAMESIZE_SNAPSHOT;
+    s_jpeg_quality   = CAM_JPEG_QUALITY_SNAPSHOT;
     cfg.fb_count     = CAM_FB_COUNT;
     cfg.fb_location  = CAMERA_FB_IN_PSRAM;
   } else {
-    /* Sin PSRAM no hay sitio para SVGA: se degrada a QVGA en vez de fallar. */
-    LOG("CAM: aviso, PSRAM no detectada -> se degrada a QVGA");
-    cfg.frame_size   = FRAMESIZE_QVGA;
-    cfg.jpeg_quality = 15;
+    /* Sin PSRAM no hay sitio para SVGA: se degrada en vez de fallar. */
+    s_framesize      = CAM_FRAMESIZE_NO_PSRAM;
+    s_jpeg_quality   = CAM_JPEG_QUALITY_NO_PSRAM;
     cfg.fb_count     = 1;
     cfg.fb_location  = CAMERA_FB_IN_DRAM;
+    LOG("CAM: aviso, PSRAM no detectada -> se degrada a %s",
+        camera_framesize_name());
   }
+  cfg.frame_size   = s_framesize;
+  cfg.jpeg_quality = s_jpeg_quality;
 
   esp_err_t err = esp_camera_init(&cfg);
   if (err != ESP_OK) {
@@ -183,8 +192,10 @@ void camera_power_up() {
   apply_sensor_defaults();
   sensor_t *s = esp_camera_sensor_get();
   if (s) {
-    s->set_framesize(s, CAM_FRAMESIZE_SNAPSHOT);
-    s->set_quality(s, CAM_JPEG_QUALITY_SNAPSHOT);
+    /* Las aplicadas en camera_init, no las de config.h: sin PSRAM, volver
+     * a SVGA aqui pediria un frame que no cabe en la RAM interna. */
+    s->set_framesize(s, s_framesize);
+    s->set_quality(s, s_jpeg_quality);
   }
   /* Descarta el primer frame, que sale con la exposicion sin converger. */
   camera_fb_t *fb = esp_camera_fb_get();
@@ -215,3 +226,34 @@ const char *camera_resolution_name() {
     default:              return "?";
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Resolucion y calidad aplicadas, para la telemetria
+ *
+ *  El nombre del enum (SVGA, QVGA...) y no "800x600": es lo que espera el
+ *  campo framesize del Fog y lo que se escribe en config.h, asi que se
+ *  compara de un vistazo con CAM_FRAMESIZE_SNAPSHOT.
+ * -------------------------------------------------------------------------*/
+const char *camera_framesize_name() {
+  switch (s_framesize) {
+    case FRAMESIZE_96X96:   return "96X96";
+    case FRAMESIZE_QQVGA:   return "QQVGA";
+    case FRAMESIZE_128X128: return "128X128";
+    case FRAMESIZE_QCIF:    return "QCIF";
+    case FRAMESIZE_HQVGA:   return "HQVGA";
+    case FRAMESIZE_240X240: return "240X240";
+    case FRAMESIZE_QVGA:    return "QVGA";
+    case FRAMESIZE_320X320: return "320X320";
+    case FRAMESIZE_CIF:     return "CIF";
+    case FRAMESIZE_HVGA:    return "HVGA";
+    case FRAMESIZE_VGA:     return "VGA";
+    case FRAMESIZE_SVGA:    return "SVGA";
+    case FRAMESIZE_XGA:     return "XGA";
+    case FRAMESIZE_HD:      return "HD";
+    case FRAMESIZE_SXGA:    return "SXGA";
+    case FRAMESIZE_UXGA:    return "UXGA";
+    default:                return "OTRO";   // el OV2640 no pasa de UXGA
+  }
+}
+
+int camera_jpeg_quality() { return s_jpeg_quality; }

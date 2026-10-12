@@ -15,43 +15,80 @@ Hay **3 unidades físicas** (`CAM-001`, `CAM-002`, `CAM-003`), mismo código
 fuente, cada una con su propio `secrets.h` (`DEVICE_ID`/`API_KEY`/`API_TOKEN`)
 antes de flashearla.
 
-El proyecto activo es `esp32cam_live_monitor/`. En `legacy/` está el sketch
-original (fotos a microSD), archivado y sin desarrollo.
+El sketch está en la raíz del repo (`esp32cam.ino`). El sketch original
+(fotos a microSD) se eliminó del repo en `d17d837`.
 
 ## Build
 
-**Arduino IDE**, no PlatformIO (se convirtió deliberadamente: el usuario no
-tiene PlatformIO instalado y el IDE ya lo tenía). No hay toolchain ESP32 en esta
-máquina, así que **no se puede compilar desde aquí** — la verificación la hace
-el usuario pulsando *Verificar* en el IDE.
+**Arduino IDE o `arduino-cli`**, no PlatformIO (se descartó deliberadamente:
+su plataforma oficial va con el core Arduino 2.x y aquí se usa el 3.x).
+`arduino-cli` está en el PATH y comparte los cores con el IDE
+(`%LOCALAPPDATA%\Arduino15`, `esp32:esp32` 3.3.12), así que **sí se puede
+compilar desde aquí**:
 
-Ajustes obligatorios en Herramientas:
+```
+arduino-cli compile --fqbn esp32:esp32:esp32cam:PartitionScheme=min_spiffs --build-path build .
+```
+
+En VS Code, `.vscode/tasks.json` tiene Verificar / Subir / Monitor serie
+(`Ctrl+Shift+B` = Verificar), con ese mismo FQBN en las tres tareas que lo
+llevan. `build/` y `.vscode/` están en `.gitignore`.
+
+Ajustes obligatorios en Herramientas (en el CLI van en el FQBN: la placa
+`esp32cam` ya trae PSRAM, pero su partición por defecto es Huge APP, así que
+el esquema hay que forzarlo):
 
 | Opción | Valor |
 |---|---|
 | Placa | AI Thinker ESP32-CAM |
-| Partition Scheme | probar primero **por defecto**; si da `Sketch too big`, pasar a Huge APP |
+| Partition Scheme | **Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)** — `PartitionScheme=min_spiffs` |
 | PSRAM | **Enabled** |
 
+**Por qué Minimal SPIFFS.** Huge APP tiene una sola ranura de app de 3 MB:
+no hay dónde escribir una versión nueva por OTA. Minimal SPIFFS tiene dos
+(`app0`/`app1`) de 1 966 080 B; el firmware ocupa ~1,13 MB (57 %). *Default*
+(1,25 MB por ranura) dejaría ~86 %, demasiado justo. Cambiar de esquema
+obliga a flashear cada placa por USB una vez (cambia la tabla de
+particiones); después, el OTA no puede cambiarla. **No volver a Huge APP**
+sin hablarlo: rompería el OTA y el rollback.
+
+**OTA preparado, no implementado.** `FW_VERSION` (entero, `config.h`) sale en
+el log de arranque junto a la partición activa y viaja al Fog como
+`fw_version`. El rollback del bootloader está activo en el core
+(`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`): `src/ota/ota_module.cpp`
+sobrescribe `verifyRollbackLater()` (con `extern "C"`: el weak está en un `.c`
+del core) para que el core no valide la imagen al arrancar, y el `.ino` llama
+a `ota_confirm_if_pending()` solo tras una subida 2xx. Una imagen OTA que se
+duerme sin eso vuelve sola a la anterior al despertar. Las imágenes
+flasheadas por USB quedan en estado `UNDEFINED` y no se ven afectadas. **Subir
+`FW_VERSION`** en cada binario que vaya a otra placa.
+
 **Sin librerías externas** salvo `HTTPClient` (viene con el core ESP32, no hay
-que instalarla). El driver del ADS1115 está escrito a mano en
-`battery_module.cpp`. No añadir dependencias del Gestor de Librerías sin
+que instalarla). No añadir dependencias del Gestor de Librerías sin
 preguntar: fue un requisito explícito del usuario.
 
 ## Estructura
 
 ```
-esp32cam_live_monitor/          ← carpeta = nombre del .ino (lo exige el IDE)
-├── esp32cam_live_monitor.ino   setup() = un ciclo completo -> deep sleep. No hay loop() real.
+esp32cam/                       ← carpeta = nombre del .ino (lo exigen IDE y CLI)
+├── esp32cam.ino                Orquestador: setup() = un ciclo completo -> deep sleep. No hay loop() real.
 ├── config.h                    TODA la configuración (menos credenciales)
 ├── secrets.h                   WiFi + DEVICE_ID/API_KEY/API_TOKEN — gitignored
 ├── secrets.h.example           Plantilla de secrets.h
-├── camera_module.h / .cpp      OV2640: init, captura, PWDN + hold para deep sleep
-├── battery_module.h / .cpp     ADS1115 + curvas de descarga (solo log por serie)
-└── upload_module.h / .cpp      POST multipart/form-data a la Raspberry Pi
+└── src/
+    ├── camera/camera_module.*  OV2640: init, captura, PWDN + hold para deep sleep
+    ├── wifi/wifi_module.*      Estación: conexión con timeout, MAC, IP fija, apagado
+    ├── upload/upload_module.*  POST multipart/form-data (foto + telemetría) a la Raspberry Pi
+    └── ota/ota_module.*        FW_VERSION/partición en el log, rollback (sin cliente OTA aún)
 ```
 
-El Arduino IDE compila todos los `.cpp`/`.h` de la carpeta del sketch.
+Arduino (IDE y CLI) compila la raíz del sketch y **solo** `src/` de forma
+recursiva; cualquier otra subcarpeta se ignora. Módulos nuevos en
+`src/<nombre>/<nombre>_module.*`. El sufijo `_module` evita nombres como
+`wifi.h`, que en Windows (sin distinción de mayúsculas) se confunde con
+`<WiFi.h>` del core. Los módulos incluyen `"../../config.h"`;
+`config.h`/`secrets.h` se quedan en la raíz porque es lo que se edita al
+flashear. El IDE 2.x no muestra `src/` como pestañas.
 
 ## Invariantes del diseño
 
@@ -70,9 +107,29 @@ falta. Al añadir una credencial nueva, va en `secrets.h` **y** en
 **2. Sin librerías externas** salvo `HTTPClient` (core ESP32).
 
 **3. El endpoint de subida es fijo, no inventar campos.** El contrato (ver
-`config.h`, sección 3, y el documento de migración) solo acepta el campo
-`file` en un POST multipart. No añadir batería, timestamp, etc. sin confirmar
-antes con el backend.
+`config.h`, sección 3, y "Contrato de la API" abajo) es un POST multipart a
+`/api/v1/camera/frames` con la foto en `file` y, en el mismo multipart, estos
+campos de telemetría acordados con el Fog (todos texto, todos opcionales para
+él; nombres exactos de `fog-application/src/vision/camera_router.py`):
+
+| Campo | Qué manda el firmware |
+|---|---|
+| `fw_version` | `FW_VERSION` de `config.h` (entero) |
+| `rssi` | `WiFi.RSSI()`, dBm |
+| `wifi_connect_ms` | `WiFi.begin` → `WL_CONNECTED`, ms (resolución 250 ms) |
+| `reset_reason` | `esp_reset_reason()`: `8` = deep sleep, `9` = brownout |
+| `awake_ms` | `millis()` justo antes del POST (sin ROM/bootloader ni el propio POST) |
+| `free_heap` | `ESP.getFreeHeap()`: solo RAM interna |
+| `wake_count` | despertares de deep sleep desde el último arranque en frío (`RTC_DATA_ATTR`; `0` tras cualquier reset que no sea deep sleep) |
+| `wifi_fail_streak` | ciclos seguidos sin WiFi **antes** de este (`RTC_DATA_ATTR`; se pone a 0 al conectar, después de leerlo) |
+| `framesize` | nombre del enum aplicado de verdad (`SVGA`, o `QVGA` si falta PSRAM) |
+| `jpeg_quality` | calidad aplicada de verdad (10–63) |
+
+**No** se envían `battery_mv`, `battery_load_mv` ni `battery_valid`: el Fog
+los sigue declarando, pero el firmware ya no mide la batería. Ningún campo
+nuevo (timestamp, batería…) sin confirmarlo antes con el backend. El `.ino`
+recoge los valores y se los pasa a `upload_frame()` en un `UploadTelemetry`
+(`upload_module.h`); el módulo de subida solo los serializa.
 
 ## Hardware: restricciones que NO son obvias
 
@@ -82,14 +139,11 @@ Esto ya costó una corrección. No repetir los errores.
 cámara) y `GPIO22 = PCLK`. El OV2640 ocupa:
 `0, 5, 18, 19, 21, 22, 23, 25, 26, 27, 32, 34, 35, 36, 39`.
 
-**No hay ADC nativo usable.** La cámara se queda con todos los canales de ADC1
-salvo GPIO33 (que lleva el LED rojo integrado en paralelo y falsea la lectura).
-ADC2 no funciona con el WiFi encendido — limitación del silicio, no un bug.
-De ahí el ADS1115 externo por I2C.
-
-**I2C en GPIO14 (SDA) / GPIO15 (SCL).** Libres porque no se usa microSD.
-GPIO15 es strapping MTDO: en alto = arranque normal, el pull-up del bus es
-seguro. **GPIO12 nunca**: strapping MTDI, un pull-up ahí impide arrancar.
+**Sin medida de batería.** Se quitó el ADS1115 (y su driver) a petición del
+usuario. Si vuelve: no hay ADC nativo usable (la cámara ocupa ADC1 salvo
+GPIO33, que lleva el LED rojo en paralelo; ADC2 no funciona con WiFi), así que
+haría falta un ADC externo. GPIO14/15 están libres (no hay microSD).
+**GPIO12 nunca** para un bus con pull-up: strapping MTDI, impide arrancar.
 
 **GPIO32 (PWDN de la cámara) es RTC-capable.** El deep sleep del ESP32 apaga
 la CPU pero **no** corta la alimentación de la cámara (comparte el rail de
@@ -98,8 +152,9 @@ la CPU pero **no** corta la alimentación de la cámara (comparte el rail de
 siguiente `camera_init()` debe soltar el hold con `rtc_gpio_hold_dis()` antes
 de reconfigurar el pin, o `pinMode`/`digitalWrite` no tienen efecto.
 
-**Límite del ADS1115**: entrada analógica ≤ VDD + 0,3 V = **3,6 V**. Con 4 pilas
-en serie (6,4 V) el divisor tiene que ser 220k/100k, no 100k/100k.
+**Monitor serie con `arduino-cli`: `dtr=off,rts=off`.** Por defecto los deja
+activos y en la ESP32-CAM-MB RTS va a EN (placa en reset permanente) y DTR a
+GPIO0 (arranque en modo descarga).
 
 ## Energía — deep sleep real
 
@@ -107,7 +162,7 @@ A diferencia de la arquitectura anterior (servidor siempre disponible, deep
 sleep inviable), ahora **sí** se usa deep sleep entre capturas: no hay nada
 que servir entre ciclos.
 
-- Cada ciclo: batería (log) → cámara → WiFi STA → capturar → POST → apagar
+- Cada ciclo: cámara → WiFi STA → capturar → POST → apagar
   cámara (PWDN + hold) → WiFi off → `esp_deep_sleep_start()`.
 - `WIFI_CONNECT_TIMEOUT_MS` acota el intento de conexión: si la Pi o el router
   no responden, el ciclo se aborta y se duerme igual (no reintentar
@@ -125,19 +180,29 @@ que servir entre ciclos.
 - Los comentarios explican **por qué**, no qué. Mucho de este código tiene
   decisiones contraintuitivas por las restricciones del hardware.
 - Logs con el macro `LOG()` de `config.h`, prefijados por subsistema:
-  `CAM:`, `BAT:`, `WIFI:`, `UPLOAD:`, `POWER:`, `SLEEP:`.
+  `CAM:`, `WIFI:`, `UPLOAD:`, `OTA:`, `POWER:`, `SLEEP:`.
 
 ## Contrato de la API (Raspberry Pi / fog node)
 
 ```
-POST http://<FOG_SERVER_HOST>:<FOG_SERVER_PORT>/api/v1/cameras/<DEVICE_ID>/frames
+POST http://<FOG_SERVER_HOST>:<FOG_SERVER_PORT>/api/v1/camera/frames   → 202 Accepted
 Headers:  X-API-Key, X-API-Token
-Body:     multipart/form-data, campo "file" = JPEG
+Body:     multipart/form-data, campo "file" = JPEG + campos de telemetría (texto)
 ```
 
-`DEVICE_ID` va en la URL, no en el body. Es HTTP plano (red local). Si el
-ESP32 no resuelve `.local` en estación, cambiar `FOG_SERVER_HOST` por la IP
-de la Pi directamente — es un cambio de config, no de código.
+Fuente de verdad: `fog-application/src/vision/camera_router.py` (el
+proveedor), no esta documentación.
+
+- `camera` en **singular** y **sin id**: el Fog resuelve qué cámara es a
+  partir de `X-API-Key`/`X-API-Token`. `/api/v1/cameras/<id>/frames` existe en
+  el Fog, pero solo como `GET` de administración (un `POST` ahí da `405`).
+- `DEVICE_ID` no viaja en la petición: solo sale en el log de arranque para
+  saber qué unidad se ha flasheado.
+- Responde **`202 Accepted`** (la detección se procesa después de responder);
+  el firmware trata cualquier 2xx como éxito.
+- Es HTTP plano (red local). Si el ESP32 no resuelve `.local` en estación,
+  cambiar `FOG_SERVER_HOST` por la IP de la Pi directamente — es un cambio de
+  config, no de código.
 
 ## Migración (contexto histórico)
 
