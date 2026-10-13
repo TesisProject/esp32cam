@@ -29,11 +29,16 @@
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <driver/rtc_io.h>
+#include <esp_system.h>
 
 /* --- Ajustes de la herramienta -------------------------------------------- */
 #define MON_AP_SSID            "ParkVision-BAT"
 #define MON_AP_PASS            "parkvision"   // WPA2, >= 8 caracteres. No es un secreto del proyecto
 #define MON_AP_CHANNEL         6
+/* Potencia de TX baja: es una red de banco a pocos metros, y el pico de
+ * corriente de la radio (~300-500 mA a 5 V con 19,5 dBm) es lo que tumba la
+ * alimentacion con la celda + MT3608 + protoboard (reinicio por brownout). */
+#define MON_AP_TX_POWER        WIFI_POWER_8_5dBm
 #define MON_INTERVAL_MS        30000   // cada cuanto se mide (cada medida apaga el AP ~1 s)
 #define MON_SETTLE_MS          500     // tras apagar el WiFi: la celda recupera la caida de la carga
 #define MON_HISTORY_LEN        720     // 6 h a 30 s; ~8,6 KB de RAM
@@ -59,6 +64,7 @@ static const size_t  kCurveLen   = sizeof(kCurveMv) / sizeof(kCurveMv[0]);
 
 #define CAM_PIN_PWDN           32
 #define CAM_PIN_FLASH_LED       4
+#define STATUS_LED_PIN         33      // LED rojo pequeno, LOW enciende
 
 /* --- Copiado de settings_module (forma del blob en la NVS) --------------- */
 #define SETTINGS_NVS_NAMESPACE  "parkvision"
@@ -84,6 +90,7 @@ static uint32_t  s_last_ms    = 0;
 static NvsBatCal s_cal        = { BATTERY_CAL_ADC_A_MV_DEFAULT, BATTERY_CAL_BAT_A_MV_DEFAULT,
                                   BATTERY_CAL_ADC_B_MV_DEFAULT, BATTERY_CAL_BAT_B_MV_DEFAULT };
 static bool      s_cal_nvs    = false;
+static bool      s_ap_ok      = false;
 
 static WebServer s_server(80);
 static DNSServer s_dns;               // todo nombre -> 192.168.4.1 (el movil abre la pagina solo)
@@ -168,14 +175,35 @@ static void take_measurement() {
                 s_last_fails ? " (fallaron lecturas del ADC2)" : "");
 }
 
+/* --- LED de estado (GPIO33) ----------------------------------------------
+ *  Fijo encendido     : midiendo (red apagada, ~0,6 s)
+ *  1 destello / 2 s   : red levantada, nadie conectado
+ *  2 destellos / 2 s  : red levantada, hay al menos un movil conectado
+ *  Parpadeo rapido    : no se pudo levantar la red
+ *  3 destellos largos al arrancar: el arranque anterior acabo en BROWNOUT
+ *                      (la alimentacion cayo); si se repite en bucle, la
+ *                      fuente no aguanta el pico del WiFi
+ *  El flash blanco (GPIO4) no se usa: ~150 mA falsearian la lectura. */
+static void led_set(bool on) { digitalWrite(STATUS_LED_PIN, on ? LOW : HIGH); }
+
+static void led_update() {
+  const uint32_t t = millis();
+  if (!s_ap_ok) { led_set((t / 100) % 2); return; }
+  const uint32_t ph = t % 2000;
+  const bool two = WiFi.softAPgetStationNum() > 0;
+  led_set(ph < 60 || (two && ph >= 200 && ph < 260));
+}
+
 /* --- WiFi (access point propio) ------------------------------------------*/
 static void ap_up() {
   WiFi.persistent(false);              // no tocar la NVS del driver
   WiFi.mode(WIFI_AP);
-  if (!WiFi.softAP(MON_AP_SSID, MON_AP_PASS, MON_AP_CHANNEL)) {
+  s_ap_ok = WiFi.softAP(MON_AP_SSID, MON_AP_PASS, MON_AP_CHANNEL);
+  if (!s_ap_ok) {
     Serial.println("WIFI: no se pudo levantar el AP");
     return;
   }
+  WiFi.setTxPower(MON_AP_TX_POWER);
   s_dns.start(53, "*", WiFi.softAPIP());
   s_server.begin();
 }
@@ -303,6 +331,16 @@ void setup() {
   digitalWrite(CAM_PIN_PWDN, HIGH);
   pinMode(CAM_PIN_FLASH_LED, OUTPUT);
   digitalWrite(CAM_PIN_FLASH_LED, LOW);
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  /* Sin monitor serie (placa a bateria), el LED dice por que se reinicio. */
+  const esp_reset_reason_t why = esp_reset_reason();
+  Serial.printf("Reset reason: %d%s\n", (int)why,
+                why == ESP_RST_BROWNOUT ? " (BROWNOUT: la alimentacion cayo)" : "");
+  if (why == ESP_RST_BROWNOUT) {
+    for (int i = 0; i < 3; i++) { led_set(true); delay(400); led_set(false); delay(300); }
+    delay(500);
+  }
+  led_set(true);                 // fijo durante la primera medida
 
   load_cal();
   take_measurement();            // primera medida con el WiFi aun sin arrancar
@@ -328,9 +366,11 @@ void loop() {
 
   if (millis() - s_last_ms >= MON_INTERVAL_MS) {
     ap_down();
+    led_set(true);
     delay(MON_SETTLE_MS);
     take_measurement();
     ap_up();
   }
+  led_update();
   delay(2);
 }

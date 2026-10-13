@@ -28,6 +28,22 @@ El sketch principal no lo compila: Arduino solo compila la raíz y `src/`.
 3. Para volver al firmware de campo, súbelo de nuevo. La NVS no se toca, así
    que la placa sigue aprovisionada.
 
+**LED rojo de la placa (GPIO33):**
+
+| LED | Significa |
+|---|---|
+| Fijo encendido | Midiendo (la red está apagada, ~0,6 s) |
+| 1 destello cada 2 s | Red levantada, nadie conectado |
+| 2 destellos cada 2 s | Red levantada y al menos un dispositivo conectado |
+| Parpadeo rápido | No se pudo levantar la red |
+| 3 destellos largos al arrancar | El arranque anterior acabó en *brownout* (la alimentación cayó). En bucle: la fuente no aguanta el pico del WiFi |
+| Nunca se enciende | No llega alimentación a la placa |
+
+La potencia de TX está bajada a 8,5 dBm (`MON_AP_TX_POWER`) para reducir el
+pico de corriente con la celda; para una red de banco a pocos metros sobra.
+
+El flash blanco (GPIO4) no se usa: consume ~150 mA y falsearía la lectura.
+
 El SSID, la clave y el canal están al principio del `.ino`
 (`MON_AP_*`). La clave no es un secreto del proyecto: solo evita que
 cualquiera se conecte a la red de banco.
