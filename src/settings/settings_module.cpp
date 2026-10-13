@@ -22,6 +22,7 @@ static const char *kKeyCred       = "cred";
 static const char *kKeyCapture    = "capture";
 static const char *kKeyCfgRev     = "cfg_rev";
 static const char *kKeyOtaRej     = "ota_rej";
+static const char *kKeyBatCal     = "bat_cal";
 
 static Preferences s_prefs;
 static bool        s_open = false;
@@ -179,6 +180,49 @@ bool settings_set_credential(const SettingsCredential &cred) {
 }
 
 bool settings_clear_credential() { return remove_key(kKeyCred); }
+
+/* ---------------------------------------------------------------------------
+ * Calibracion de la bateria
+ * -------------------------------------------------------------------------*/
+bool settings_battery_cal_valid(const SettingsBatteryCal &cal, const char **why) {
+  const char *dummy;
+  if (!why) why = &dummy;
+  if (cal.adc_a_mv > BATTERY_CAL_ADC_MAX_MV || cal.adc_b_mv > BATTERY_CAL_ADC_MAX_MV) {
+    *why = "batteryCal: adcA/adcB deben estar entre 0 y 3300 mV";
+    return false;
+  }
+  if (cal.bat_a_mv < BATTERY_VALID_MIN_MV || cal.bat_a_mv > BATTERY_VALID_MAX_MV ||
+      cal.bat_b_mv < BATTERY_VALID_MIN_MV || cal.bat_b_mv > BATTERY_VALID_MAX_MV) {
+    *why = "batteryCal: batA/batB deben estar entre 2500 y 4500 mV (Li-ion 1S)";
+    return false;
+  }
+  /* B por encima de A en los dos ejes: la recta del divisor siempre sube
+   * (mas bateria = mas tension en GPIO13). Al reves es un error de anotacion. */
+  if ((int)cal.bat_b_mv - (int)cal.bat_a_mv < BATTERY_CAL_MIN_BAT_SPAN_MV) {
+    *why = "batteryCal: batB debe superar a batA en 300 mV o mas (p. ej. celda llena y a media carga)";
+    return false;
+  }
+  if ((int)cal.adc_b_mv - (int)cal.adc_a_mv < BATTERY_CAL_MIN_ADC_SPAN_MV) {
+    *why = "batteryCal: adcB debe superar a adcA en 30 mV o mas";
+    return false;
+  }
+  return true;
+}
+
+bool settings_get_battery_cal(SettingsBatteryCal &out) {
+  /* Se revalida al leer: una recta absurda daria tensiones absurdas y un
+   * corte por bateria baja que no existe. Mejor los defectos. */
+  if (get_blob(kKeyBatCal, out) && settings_battery_cal_valid(out, nullptr)) return true;
+  out.adc_a_mv = BATTERY_CAL_ADC_A_MV_DEFAULT;
+  out.bat_a_mv = BATTERY_CAL_BAT_A_MV_DEFAULT;
+  out.adc_b_mv = BATTERY_CAL_ADC_B_MV_DEFAULT;
+  out.bat_b_mv = BATTERY_CAL_BAT_B_MV_DEFAULT;
+  return false;
+}
+
+bool settings_set_battery_cal(const SettingsBatteryCal &cal) {
+  return put_blob(kKeyBatCal, cal);
+}
 
 /* ---------------------------------------------------------------------------
  * Captura y revision (E8)

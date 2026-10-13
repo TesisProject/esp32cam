@@ -83,7 +83,8 @@ static void handle_line(size_t len, bool wifi_required) {
    * silencio y la placa seguiria con el host por defecto. */
   for (const cJSON *it = root->child; it; it = it->next) {
     if (strcmp(it->string, "wifi") != 0 && strcmp(it->string, "fogHost") != 0 &&
-        strcmp(it->string, "fogPort") != 0 && strcmp(it->string, "cmd") != 0) {
+        strcmp(it->string, "fogPort") != 0 && strcmp(it->string, "batteryCal") != 0 &&
+        strcmp(it->string, "cmd") != 0) {
       PROV_REPLY("ERROR campo desconocido: \"%s\"", it->string);
       cJSON_Delete(root);
       return;
@@ -148,7 +149,30 @@ static void handle_line(size_t len, bool wifi_required) {
     }
   }
 
-  if (!why && !jwifi && !jhost && !jport) why = "nada que guardar";
+  /* --- Calibracion de la bateria ----------------------------------------
+   * Opcional y propia de cada placa: dos puntos medidos con el monitor serie
+   * (linea "BAT:") y un multimetro en la celda. */
+  SettingsBatteryCal cal = {};
+  const cJSON *jcal = cJSON_GetObjectItemCaseSensitive(root, "batteryCal");
+  if (!why && jcal) {
+    static const char *kCalKeys[] = {"adcA", "batA", "adcB", "batB"};
+    uint16_t *dst[] = {&cal.adc_a_mv, &cal.bat_a_mv, &cal.adc_b_mv, &cal.bat_b_mv};
+    if (!cJSON_IsObject(jcal) || cJSON_GetArraySize(jcal) != 4) {
+      why = "batteryCal debe ser {\"adcA\":mV,\"batA\":mV,\"adcB\":mV,\"batB\":mV}";
+    }
+    for (size_t i = 0; !why && i < 4; i++) {
+      const cJSON *v = cJSON_GetObjectItemCaseSensitive(jcal, kCalKeys[i]);
+      const double d = cJSON_IsNumber(v) ? v->valuedouble : -1;
+      if (d < 0 || d > 65535 || d != (double)(long)d) {
+        why = "batteryCal: adcA, batA, adcB y batB deben ser enteros en mV";
+      } else {
+        *dst[i] = (uint16_t)d;
+      }
+    }
+    if (!why) settings_battery_cal_valid(cal, &why);
+  }
+
+  if (!why && !jwifi && !jhost && !jport && !jcal) why = "nada que guardar";
   cJSON_Delete(root);
 
   if (why) {
@@ -164,6 +188,10 @@ static void handle_line(size_t len, bool wifi_required) {
     PROV_REPLY("ERROR no se pudo escribir el Fog en la NVS");
     return;
   }
+  if (jcal && !settings_set_battery_cal(cal)) {
+    PROV_REPLY("ERROR no se pudo escribir la calibracion de bateria en la NVS");
+    return;
+  }
   if (jwifi && !settings_set_wifi(wifi)) {
     PROV_REPLY("ERROR no se pudo escribir la WiFi en la NVS");
     return;
@@ -172,10 +200,15 @@ static void handle_line(size_t len, bool wifi_required) {
 
   SettingsWifi saved = {};
   settings_get_wifi(saved);
+  SettingsBatteryCal saved_cal;
+  const bool cal_from_nvs = settings_get_battery_cal(saved_cal);
   /* La contrasena nunca sale por el serie. El SSID si: no es secreto y es lo
    * que hay que comprobar a ojo. */
-  PROV_REPLY("OK guardado: wifi=\"%s\" fog=%s:%u. Reiniciando",
-             saved.ssid, fog.host, (unsigned)fog.port);
+  PROV_REPLY("OK guardado: wifi=\"%s\" fog=%s:%u bat=%u->%u,%u->%u (%s). Reiniciando",
+             saved.ssid, fog.host, (unsigned)fog.port,
+             (unsigned)saved_cal.adc_a_mv, (unsigned)saved_cal.bat_a_mv,
+             (unsigned)saved_cal.adc_b_mv, (unsigned)saved_cal.bat_b_mv,
+             cal_from_nvs ? "NVS" : "defecto");
   memset(&saved, 0, sizeof(saved));
   restart_now();
 }

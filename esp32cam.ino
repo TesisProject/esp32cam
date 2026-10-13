@@ -5,14 +5,16 @@
  *  Cada despertar del deep sleep ejecuta un ciclo completo dentro de setup():
  *    0. Leer la configuracion de la placa de la NVS (WiFi, Fog). Si no hay
  *       WiFi, modo aprovisionamiento por USB y nada mas (ver abajo).
- *    1. Inicializar la camara.
- *    2. Conectar WiFi en modo estacion (con timeout: sin red no hay nada que
+ *    1. Medir la bateria (GPIO13 es ADC2: antes del WiFi). Si esta por
+ *       debajo del corte, dormir sin encender camara ni WiFi.
+ *    2. Inicializar la camara.
+ *    3. Conectar WiFi en modo estacion (con timeout: sin red no hay nada que
  *       subir, no vale la pena reintentar indefinidamente y gastar bateria).
- *    3. Capturar 1 frame JPEG y subirlo por POST multipart a la Raspberry Pi
+ *    4. Capturar 1 frame JPEG y subirlo por POST multipart a la Raspberry Pi
  *       (fog node), que procesa las plazas de parking y reenvia el resultado
  *       a la nube. El ESP32 no sabe nada de eso: solo manda el JPEG (y la
  *       telemetria del ciclo en el mismo POST).
- *    4. Apagar camara (PWDN + hold) y WiFi, y dormir CAPTURE_INTERVAL_MS.
+ *    5. Apagar camara (PWDN + hold) y WiFi, y dormir CAPTURE_INTERVAL_MS.
  *
  *  Junto a la foto viaja la telemetria del ciclo (UploadTelemetry). Si la
  *  imagen en ejecucion viene de un OTA y aun no esta confirmada, solo se
@@ -43,6 +45,7 @@
 #include "src/ota/ota_module.h"
 #include "src/settings/settings_module.h"
 #include "src/provision/provision_module.h"
+#include "src/battery/battery_module.h"
 
 /* ===========================================================================
  * Estado entre ciclos (memoria RTC lenta)
@@ -61,6 +64,10 @@ RTC_DATA_ATTR static uint32_t s_wake_count = 0;
  * reporta el valor de ANTES de ponerlo a 0: si no, el Fog (que solo recibe
  * datos de los ciclos que SI conectan) veria siempre 0. */
 RTC_DATA_ATTR static uint32_t s_wifi_fail_streak = 0;
+
+/* true desde que un ciclo se corto por bateria baja hasta que la bateria
+ * supera BATTERY_RESUME_MV: es la memoria de la histeresis del corte. */
+RTC_DATA_ATTR static bool s_battery_low = false;
 
 /* ===========================================================================
  * Apagado y deep sleep
@@ -102,6 +109,7 @@ void setup() {
   } else {
     s_wake_count       = 0;
     s_wifi_fail_streak = 0;
+    s_battery_low      = false;
   }
   LOG("Reset reason: %d  wake_count=%lu  wifi_fail_streak=%lu",
       (int)reset_reason, (unsigned long)s_wake_count,
@@ -147,6 +155,31 @@ void setup() {
   LOG("NVS: wifi=\"%s\"  fog=%s:%u (%s)", wifi.ssid, fog.host, (unsigned)fog.port,
       fog_from_nvs ? "NVS" : "defecto de config.h");
 
+  /* --- Bateria ------------------------------------------------------------------
+   * Antes que la camara (lectura en reposo, sin los ~100 mA del sensor) y,
+   * sobre todo, antes que el WiFi: GPIO13 es ADC2. Despues del
+   * aprovisionamiento a proposito: una placa por USB sin celda (o con una
+   * celda casi vacia) podria leer por debajo del corte, y si el corte fuera
+   * antes no se podria volver a aprovisionar. */
+  SettingsBatteryCal bat_cal;
+  const bool bat_cal_from_nvs = settings_get_battery_cal(bat_cal);
+  BatteryReading bat;
+  battery_read(bat_cal, bat);
+  LOG("BAT: ADC IO13: %lu mV | Bateria: %.2f V | %d %% %s(cal. %s)",
+      (unsigned long)bat.adc_mv, bat.mv / 1000.0f,
+      bat.percent, bat.valid ? "" : "NO VALIDA ", bat_cal_from_nvs ? "NVS" : "defecto");
+
+  if (bat.valid) {
+    const int32_t threshold = s_battery_low ? BATTERY_RESUME_MV : BATTERY_CUTOFF_MV;
+    if (bat.mv < threshold) {
+      s_battery_low = true;
+      LOG("BAT: %ld mV < %ld mV: bateria baja, se duerme sin camara ni WiFi",
+          (long)bat.mv, (long)threshold);
+      go_to_sleep();
+    }
+    s_battery_low = false;
+  }
+
   /* --- Camara --------------------------------------------------------------*/
   if (!camera_init()) {
     LOG("FATAL: la camara no arranca. Se aborta el ciclo y se duerme igual.");
@@ -178,6 +211,8 @@ void setup() {
     t.wifi_fail_streak = wifi_fail_streak;
     t.framesize        = camera_framesize_name();
     t.jpeg_quality     = camera_jpeg_quality();
+    t.battery_valid    = bat.valid;
+    t.battery_mv       = bat.mv;
     /* millis() vuelve a 0 en cada despertar (el deep sleep es un reset), asi
      * que es el tiempo despierto de este ciclo hasta el POST. No incluye la
      * ROM ni el bootloader (unos cientos de ms) ni el propio POST: es una

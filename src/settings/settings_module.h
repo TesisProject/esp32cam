@@ -19,6 +19,11 @@
  *    capture     blob   intervalo, framesize, calidad              E8
  *    cfg_rev     u32    ultima revision de config aplicada         E8
  *    ota_rej     u32    version OTA rechazada por rollback         E5
+ *    bat_cal     blob   calibracion del divisor de bateria         bateria
+ *
+ *  bat_cal se anadio despues de E6 como clave NUEVA, sin tocar la forma de
+ *  ningun blob: una placa ya aprovisionada no la tiene y usa los defectos,
+ *  asi que no hizo falta subir SETTINGS_SCHEMA_VERSION.
  *
  *  Cada grupo que se escribe junto va en UN blob: la NVS escribe una entrada
  *  de forma atomica, asi que un corte de alimentacion a mitad de grabar no
@@ -50,6 +55,15 @@ struct SettingsCredential {
   char camera_code[CAM_CODE_MAX_LEN + 1];
   char api_key[API_SECRET_MAX_LEN + 1];
   char api_token[API_SECRET_MAX_LEN + 1];
+};
+
+/* Dos puntos (tension en GPIO13, tension real del pack), medidos a la vez
+ * con el monitor serie y un multimetro. Ver la seccion de bateria de config.h. */
+struct SettingsBatteryCal {
+  uint16_t adc_a_mv;
+  uint16_t bat_a_mv;
+  uint16_t adc_b_mv;
+  uint16_t bat_b_mv;
 };
 
 struct SettingsCapture {
@@ -86,6 +100,14 @@ bool settings_set_fog(const SettingsFog &fog);
 bool settings_get_credential(SettingsCredential &out);
 bool settings_set_credential(const SettingsCredential &cred);
 bool settings_clear_credential();
+
+/* --- Calibracion de la bateria. Sin valor valido en la NVS, devuelve los
+ * defectos de config.h. true si viene de la NVS. -----------------------------*/
+bool settings_get_battery_cal(SettingsBatteryCal &out);
+bool settings_set_battery_cal(const SettingsBatteryCal &cal);
+/* Reglas de una calibracion aceptable (las usa tambien el aprovisionamiento).
+ * why: motivo legible si no lo es. */
+bool settings_battery_cal_valid(const SettingsBatteryCal &cal, const char **why);
 
 /* --- Captura y revision de la config del Fog (E8) --------------------------*/
 bool     settings_get_capture(SettingsCapture &out);

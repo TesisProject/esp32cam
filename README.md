@@ -4,7 +4,7 @@ Firmware para **ESP32-CAM AI-Thinker**, proyecto de tesis UPC ("ParkVision").
 Cada ciclo el módulo captura una foto, la sube por `POST` a una Raspberry Pi
 local ("fog node") que detecta plazas de parking y reenvía el resultado como
 JSON a la nube, y entre captura y captura se apaga casi por completo (deep
-sleep) para maximizar la autonomía con pilas AA.
+sleep) para maximizar la autonomía con baterías Li-ion.
 
 **Sin dashboard. Sin servidor HTTP local. Sin librerías externas**: solo lo
 que trae el core ESP32 (`HTTPClient`, `Preferences`, cJSON). Un sketch, y la
@@ -14,7 +14,8 @@ binario.
 ```
 ESP32-CAM  ─ HTTP POST (JPEG) ─→  Raspberry Pi (fog node)  ─→  nube
    │
-   ├─ 5V ←── pack de 4 pilas AA
+   ├─ 5V ←── MT3608 ←── TP4056 ←── una 18650 Li-ion (1S)
+   ├─ GPIO13 ←── divisor 100k/100k (tensión del pack)
    └─ SCCB ──→ OV2640
 ```
 
@@ -28,7 +29,7 @@ propio `secrets.h` (credencial de la API); la WiFi ya no va ahí.
 
 | Parámetro | Valor |
 |---|---|
-| Pack de batería | **4 × AA alcalinas en serie**, sin medida de tensión |
+| Pack de batería | **una celda 18650 Li-ion (1S, 3,0–4,2 V)** → TP4056 → MT3608 a 5 V; tensión medida por GPIO13 (§4.3) |
 | microSD | **No se usa** |
 | Red | **Solo estación** — necesita el router para llegar a la Pi; el modo AP impide dormir |
 | Intervalo de captura | **5 minutos** (`CAPTURE_INTERVAL_MS`), deep sleep entre medio |
@@ -56,6 +57,7 @@ esp32cam/
 │   ├── wifi/wifi_module.*      Conexión en modo estación (timeout, MAC, IP fija)
 │   ├── upload/upload_module.*  POST multipart/form-data (foto + telemetría) a la Raspberry Pi
 │   ├── ota/ota_module.*        FW_VERSION y partición en el log; rollback de imágenes OTA
+│   ├── battery/battery_module.*  Tensión del pack por GPIO13 y % (antes del WiFi)
 │   ├── settings/settings_module.*   Única puerta a la NVS (Preferences)
 │   └── provision/provision_module.* Aprovisionamiento por serie (línea JSON)
 └── README.md
@@ -83,16 +85,18 @@ principio a fin y termina en `esp_deep_sleep_start()`, que no retorna.
 
 0. Leer de la NVS la WiFi y el Fog. Sin WiFi guardada, la placa solo espera
    el aprovisionamiento por USB (§6.6) y, si no llega, vuelve a dormir.
-1. Inicializar la cámara.
-2. Conectar WiFi en modo estación, con timeout (`WIFI_CONNECT_TIMEOUT_MS`).
-3. Capturar 1 frame JPEG y subirlo por `POST` a la Pi, con la telemetría
+1. Medir la batería (GPIO13 es ADC2: tiene que ser antes del WiFi). Por
+   debajo de 3,3 V, dormir sin encender cámara ni WiFi (§4.3).
+2. Inicializar la cámara.
+3. Conectar WiFi en modo estación, con timeout (`WIFI_CONNECT_TIMEOUT_MS`).
+4. Capturar 1 frame JPEG y subirlo por `POST` a la Pi, con la telemetría
    del ciclo en el mismo multipart (ver abajo). Si la respuesta es 2xx y la
    imagen en ejecución viene de un OTA sin confirmar, confirmarla.
-4. Apagar la cámara (PWDN + `rtc_gpio_hold_en`), apagar WiFi, dormir
+5. Apagar la cámara (PWDN + `rtc_gpio_hold_en`), apagar WiFi, dormir
    `CAPTURE_INTERVAL_MS` y repetir.
 
 Si falla la cámara o el WiFi, el ciclo se aborta y el dispositivo duerme
-igual — no se queda colgado reintentando, que gasta batería con pilas.
+igual — no se queda colgado reintentando, que gasta batería.
 
 ### Telemetría que acompaña a cada foto
 
@@ -111,10 +115,14 @@ que descarta sin fallar cualquier valor que no sepa leer.
 | `wake_count` | despertares desde el último arranque en frío |
 | `wifi_fail_streak` | ciclos seguidos sin WiFi antes de este |
 | `framesize` / `jpeg_quality` | resolución y calidad aplicadas de verdad (`QVGA`/15 si falta PSRAM) |
+| `battery_valid` | `true` si la lectura de GPIO13 es la de un pack Li-ion conectado (2,5–4,5 V) |
+| `battery_mv` | tensión del pack en reposo, mV; solo se envía si `battery_valid` es `true` |
 
-No se envían los campos de batería que el Fog todavía declara
-(`battery_mv`, `battery_load_mv`, `battery_valid`): ya no hay medida de
-batería.
+El **porcentaje no viaja**: el Fog guarda medidas y deriva el % al leer, para
+que cambiar la curva de descarga no invalide el histórico (ignora un campo
+`battery_percent`). El firmware lo calcula solo para el log serie.
+`battery_load_mv` (tensión durante la transmisión) tampoco: GPIO13 es ADC2 y
+no se puede leer con el WiFi encendido.
 
 ---
 
@@ -126,9 +134,12 @@ batería.
 El OV2640 ocupa: `0, 5, 18, 19, 21, 22, 23, 25, 26, 27, 32, 34, 35, 36, 39`.
 GPIO33 lleva el LED rojo integrado (LED de estado, `STATUS_LED_PIN`).
 
+GPIO13 mide la batería (divisor, §4.3).
+
 > **Si en el futuro añades algo por GPIO**: GPIO12 es el strapping MTDI y un
 > pull-up ahí impide arrancar el chip. GPIO14/15 están libres mientras no se
-> use la microSD.
+> use la microSD; si vuelve la microSD, solo en modo 1 bit
+> (`SD_MMC.begin("/sdcard", true)`), porque en 4 bits usa GPIO13.
 
 ---
 
@@ -136,12 +147,12 @@ GPIO33 lleva el LED rojo integrado (LED de estado, `STATUS_LED_PIN`).
 
 ### 4.1 Alimentación
 
-La ESP32-CAM tiene un LDO **AMS1117** de 5 V → 3,3 V. Con 4 pilas AA en serie
-(hasta 6,4 V con pilas nuevas) entrando al pin `5V`, el LDO tira a calor todo
-lo que sobra por encima de 3,3 V. Pon un **condensador de 470–1000 µF** lo más
-cerca posible del pin de alimentación: los picos de TX del WiFi son de
+Una celda 18650 (1S, 3,0–4,2 V) → **TP4056** con protección (carga y
+corte por descarga profunda) → **MT3608** ajustado a 5,0 V → pin `5V` de la
+placa → su LDO **AMS1117** a 3,3 V. Pon un **condensador de 470–1000 µF** lo
+más cerca posible del pin de alimentación: los picos de TX del WiFi son de
 300–500 mA durante microsegundos y son la causa nº 1 de reinicios por
-brownout con pilas.
+brownout.
 
 ### 4.2 GPIO32 (PWDN) durante el deep sleep
 
@@ -151,6 +162,72 @@ PWDN (GPIO32) en alto para apagar el sensor y usa `rtc_gpio_hold_en()` para
 que ese nivel se mantenga durante todo el deep sleep (GPIO32 es RTC-capable).
 Al despertar, `camera_init()` suelta el hold con `rtc_gpio_hold_dis()` antes
 de reconfigurar el pin.
+
+### 4.3 Medida de la batería (GPIO13)
+
+Divisor **100 kΩ + 100 kΩ** desde VIN+ del MT3608 (la tensión de la celda)
+a GND; el punto medio va a **GPIO13**, con **100 nF** a GND. El divisor
+consume ~20 µA permanentes.
+
+**Relación.** En GPIO13 solo está el divisor; no hay nada más que desplace
+el nodo (comprobado en la placa real el 2026-10-13), así que `V13 = Vbat/2`:
+
+| Vbat | 3,0 V | 3,3 V | 3,7 V | 4,2 V |
+|---|---|---|---|---|
+| V13 (nominal) | 1,50 V | 1,65 V | 1,85 V | 2,10 V |
+
+Todo el rango cabe en ~600 mV del ADC y por debajo de ~2,45 V, donde el ADC
+del ESP32 a 12 dB es lineal; 1 mV de error en GPIO13 son 2 mV de batería.
+
+**Por qué calibrar igualmente con dos puntos y no multiplicar por 2.** El ADC
+de cada ESP32 tiene su propio error de ganancia y de offset (decenas de mV
+incluso con la calibración de fábrica del eFuse que usa
+`analogReadMilliVolts`), y las resistencias del 1 % también mueven la razón.
+Todo es lineal, así que dos puntos medidos corrigen ambos errores.
+Precisión esperable tras calibrar: **±20–30 mV, ~±5 %** de carga en la zona
+plana de la curva (3,65–3,85 V, donde 100 mV son 15–30 %). La lectura
+nocturna (sin el panel cargando) es la más fiable.
+
+**ADC2 y WiFi.** GPIO13 es ADC2, que el WiFi ocupa en cuanto arranca. El
+firmware lee al principio del ciclo, con la radio apagada (32 muestras,
+~70 ms) y antes de encender la cámara, para medir en reposo.
+
+**Lectura no válida.** Si la recta da algo fuera de 2,5–4,5 V (placa
+alimentada por USB sin celda: GPIO13 a ~0 V; o sin divisor: GPIO13 al aire),
+se envía `battery_valid=false`, no se envía `battery_mv` y
+**no** se aplica el corte.
+
+**Corte por batería baja.** Por debajo de **3,3 V** la placa vuelve a dormir
+sin encender cámara ni WiFi (evita los picos de TX con la celda casi vacía).
+Con **histéresis**: una celda Li-ion recupera 50–100 mV en reposo, así que
+una vez cortada no vuelve a transmitir hasta superar **3,4 V**. Umbrales en
+`config.h` (`BATTERY_CUTOFF_MV`, `BATTERY_RESUME_MV`).
+
+En el monitor serie, cada ciclo:
+
+```
+[     412] BAT: ADC IO13: 1855 mV | Bateria: 3.71 V | 39 % (cal. defecto)
+```
+
+#### Calibrar (una vez por placa)
+
+Los defectos de `config.h` son la razón nominal 1/2; cada placa se desvía
+(ADC y tolerancia del divisor), así que conviene calibrarla:
+
+1. Con todo montado, abre el monitor serie y anota `ADC IO13` de la línea
+   `BAT:`. En ese mismo momento mide con el multímetro la tensión de las
+   celda (sus bornes, no el punto medio). Mejor sin el panel cargando.
+2. Repite con otro nivel de carga separado **al menos 300 mV**, p. ej. celda
+   llena (~4,15 V) y a media carga (~3,7 V).
+3. Añade los dos puntos a tu `provision.local.json` y reaprovisiona (§6.6):
+
+   ```json
+   "batteryCal": { "adcA": 1838, "batA": 3700, "adcB": 2061, "batB": 4150 }
+   ```
+
+   `adcA`/`adcB` son los mV de la línea `BAT:`; `batA`/`batB`, los del
+   multímetro. Se guarda en la NVS de esa placa: no hay que recompilar, y el
+   mismo `.bin` sirve para las tres cámaras.
 
 ---
 
@@ -170,11 +247,12 @@ Con un ciclo de ~3 s despierto cada 5 minutos, el consumo medio está dominado
 casi por completo por la corriente de deep sleep (microamperios), muy por
 debajo de los ~85 mA continuos de la arquitectura anterior con servidor
 siempre disponible. La autonomía real depende sobre todo de la autodescarga
-de las pilas alcalinas más que del consumo activo del ESP32.
+de la batería y de las pérdidas del MT3608 y del AMS1117 más que del
+consumo activo del ESP32.
 
 **Para pruebas de campo**: bajar `CAPTURE_INTERVAL_MS` a 30000 (30 s) para no
 esperar 5 minutos entre cada verificación, y devolverlo a 300000 antes de
-dejar la cámara desatendida con pilas.
+dejar la cámara desatendida con batería.
 
 ---
 
@@ -295,7 +373,7 @@ completo con `CAPTURE_INTERVAL_MS` bajado a 30 s para pruebas:
 ```
 
 - `Reset reason: 8` es el despertar normal del deep sleep; `1` es encendido
-  y `9` brownout (pilas o condensador). Con cualquier valor distinto de `8`,
+  y `9` brownout (batería o condensador). Con cualquier valor distinto de `8`,
   `wake_count` vuelve a 0.
 - Sin PSRAM, `CAM:` avisa de que se degrada a QVGA y aparece
   `UPLOAD: body en RAM interna (... bytes, sin PSRAM)`: la foto se sube
@@ -332,7 +410,8 @@ sketch) con una línea JSON por el puerto serie:
    contraseña de 8 a 63 caracteres ASCII: las redes abiertas se rechazan.
    `fogHost` es un nombre o una IP, **sin** `http://` ni `:puerto`.
    `fogHost`/`fogPort` son opcionales: sin ellos se usan los defectos de
-   `config.h` (`parkvision.local:8000`).
+   `config.h` (`parkvision.local:8000`). También es opcional `batteryCal`,
+   la calibración de la medida de batería (§4.3).
 
 2. Cierra el Monitor serie (el puerto no se puede abrir dos veces) y ejecuta:
 
@@ -386,7 +465,7 @@ terminada en salto de línea.
 | Imagen más nítida | `CAM_JPEG_QUALITY_SNAPSHOT 10`, `CAM_FRAMESIZE_SNAPSHOT FRAMESIZE_UXGA` |
 | Cámara del revés | `CAM_VFLIP 1` y/o `CAM_HMIRROR 1` |
 | IP siempre la misma | `WIFI_USE_STATIC_IP 1` + los cuatro `WIFI_STATIC_*` |
-| Reinicios por brownout con pilas | primero el condensador; si persiste, `POWER_DISABLE_BROWNOUT 1` |
+| Reinicios por brownout | primero el condensador; si persiste, `POWER_DISABLE_BROWNOUT 1` |
 
 Después de tocar `config.h`, **vuelve a subir el sketch**: es código compilado.
 

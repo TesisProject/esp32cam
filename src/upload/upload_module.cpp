@@ -47,12 +47,12 @@ static uint8_t *alloc_body(size_t len) {
  * Cabecera del multipart: partes de texto de la telemetria + cabecera de la
  * parte "file". Todo lo que va antes de los bytes del JPEG.
  *
- *  Tamano maximo con los 10 campos: 10 x (80 de delimitador y
- *  Content-Disposition) + 105 de nombres + ~106 de valores + 130 de la
- *  cabecera de "file" = ~1,15 KB. Buffer estatico (en .bss, no en la pila de
+ *  Tamano maximo con los 12 campos: 12 x (80 de delimitador y
+ *  Content-Disposition) + 128 de nombres + ~117 de valores + 130 de la
+ *  cabecera de "file" = ~1,35 KB. Buffer estatico (en .bss, no en la pila de
  *  loopTask, que tambien usa HTTPClient) con margen de sobra.
  * -------------------------------------------------------------------------*/
-static char s_head[1536];
+static char s_head[2048];
 
 /* Anade una parte de texto. false si no cabe (no deberia pasar nunca). */
 static bool add_field(size_t &len, const char *name, const char *value) {
@@ -93,7 +93,11 @@ static size_t build_telemetry(const UploadTelemetry &t) {
       add_uint(len, "wake_count",       t.wake_count)       &&
       add_uint(len, "wifi_fail_streak", t.wifi_fail_streak) &&
       add_field(len, "framesize",       t.framesize ? t.framesize : "") &&
-      add_int (len, "jpeg_quality",     t.jpeg_quality);
+      add_int (len, "jpeg_quality",     t.jpeg_quality)     &&
+      add_field(len, "battery_valid",   t.battery_valid ? "true" : "false") &&
+      /* Sin medida fiable no se manda una tension: ensuciaria el historico
+       * del Fog con valores que parecen buenos. */
+      (!t.battery_valid || add_int(len, "battery_mv", t.battery_mv));
   if (!ok) {
     /* La foto es lo critico: si la telemetria no cabe, se manda sin ella. */
     LOG("UPLOAD: la telemetria no cabe en el buffer, se envia solo la foto");
@@ -117,14 +121,15 @@ int upload_frame(const char *fog_host, uint16_t fog_port,
   if (telemetry) {
     head_len = build_telemetry(*telemetry);
     LOG("UPLOAD: telemetria fw=%d rssi=%d wifi_ms=%lu reset=%d awake_ms=%lu "
-        "heap=%lu wake=%lu wifi_fails=%lu %s q=%d",
+        "heap=%lu wake=%lu wifi_fails=%lu %s q=%d bat=%ld mV%s",
         telemetry->fw_version, telemetry->rssi,
         (unsigned long)telemetry->wifi_connect_ms, telemetry->reset_reason,
         (unsigned long)telemetry->awake_ms, (unsigned long)telemetry->free_heap,
         (unsigned long)telemetry->wake_count,
         (unsigned long)telemetry->wifi_fail_streak,
         telemetry->framesize ? telemetry->framesize : "?",
-        telemetry->jpeg_quality);
+        telemetry->jpeg_quality, (long)telemetry->battery_mv,
+        telemetry->battery_valid ? "" : " (no valida, no se envia)");
   }
 
   /* Cabecera de la parte "file", detras de la telemetria. Cabe siempre: el

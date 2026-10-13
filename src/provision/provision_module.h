@@ -4,6 +4,10 @@
  *  Protocolo (contrato C), una linea JSON terminada en '\n':
  *    {"wifi":{"ssid":"...","password":"..."},"fogHost":"...","fogPort":8000}
  *    {"cmd":"erase"}                       -> borra la NVS del proyecto
+ *  Opcional en la primera forma (y suficiente por si sola al reaprovisionar):
+ *    "batteryCal":{"adcA":2610,"batA":3700,"adcB":2720,"batB":4150}
+ *  (mV en GPIO13 y mV reales del pack, dos puntos; ver config.h). Sin ella
+ *  se usan los defectos de config.h.
  *  Respuestas, siempre una linea que empieza por "PROV: ":
  *    PROV: READY ...    la placa escucha desde ahora (el script espera esto)
  *    PROV: OK ...       guardado; la placa reinicia a continuacion

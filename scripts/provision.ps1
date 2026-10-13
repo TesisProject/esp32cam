@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Graba la WiFi y el host del Fog en la NVS de una ESP32-CAM por el puerto serie.
+  Graba la WiFi, el host del Fog y (opcional) la calibracion de la bateria en
+  la NVS de una ESP32-CAM por el puerto serie.
 
 .DESCRIPTION
   Implementa el lado PC del contrato C (aprovisionamiento por USB):
@@ -79,7 +80,7 @@ if ($Erase) {
 
   # Mismas reglas que provision_module.cpp: fallar aqui es mas claro que leer
   # un "PROV: ERROR" por el serie.
-  $known = @('wifi', 'fogHost', 'fogPort')
+  $known = @('wifi', 'fogHost', 'fogPort', 'batteryCal')
   foreach ($p in $cfg.PSObject.Properties.Name) {
     if ($known -notcontains $p) { Fail "Campo desconocido en '$File': '$p' (validos: $($known -join ', '))" }
   }
@@ -103,9 +104,33 @@ if ($Erase) {
     }
   }
 
+  $calText = 'defecto'
+  if ($null -ne $cfg.batteryCal) {
+    # Dos puntos: mV en GPIO13 (linea "BAT:" del log) y mV reales del pack.
+    $calKeys = @('adcA', 'batA', 'adcB', 'batB')
+    foreach ($p in $cfg.batteryCal.PSObject.Properties.Name) {
+      if ($calKeys -notcontains $p) { Fail "batteryCal: campo desconocido '$p' (validos: $($calKeys -join ', '))." }
+    }
+    $cal = @{}
+    foreach ($k in $calKeys) {
+      $n = 0
+      if (-not [int]::TryParse([string]$cfg.batteryCal.$k, [ref]$n)) { Fail "batteryCal.$k debe ser un entero en mV." }
+      $cal[$k] = $n
+    }
+    if ($cal.adcA -lt 0 -or $cal.adcA -gt 3300 -or $cal.adcB -lt 0 -or $cal.adcB -gt 3300) {
+      Fail "batteryCal: adcA/adcB deben estar entre 0 y 3300 mV."
+    }
+    if ($cal.batA -lt 2500 -or $cal.batA -gt 4500 -or $cal.batB -lt 2500 -or $cal.batB -gt 4500) {
+      Fail "batteryCal: batA/batB deben estar entre 2500 y 4500 mV (Li-ion 1S)."
+    }
+    if ($cal.batB - $cal.batA -lt 300) { Fail "batteryCal: batB debe superar a batA en 300 mV o mas." }
+    if ($cal.adcB - $cal.adcA -lt 30) { Fail "batteryCal: adcB debe superar a adcA en 30 mV o mas." }
+    $calText = "$($cal.adcA)->$($cal.batA),$($cal.adcB)->$($cal.batB)"
+  }
+
   # Una sola linea: el firmware lee hasta '\n'.
   $line = $cfg | ConvertTo-Json -Compress -Depth 5
-  $summary = "wifi.ssid=""$ssid"" fogHost=$($cfg.fogHost) fogPort=$($cfg.fogPort)"
+  $summary = "wifi.ssid=""$ssid"" fogHost=$($cfg.fogHost) fogPort=$($cfg.fogPort) batteryCal=$calText"
 }
 
 # --- 2. Puerto ----------------------------------------------------------------

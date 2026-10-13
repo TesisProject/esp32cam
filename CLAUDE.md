@@ -8,7 +8,7 @@ Firmware para **ESP32-CAM AI-Thinker**, proyecto de tesis UPC ("ParkVision").
 El dispositivo es **cliente**: cada ciclo captura una foto, la sube por POST a
 una Raspberry Pi local ("fog node") que detecta plazas de parking y reenvía el
 resultado a la nube, y entre captura y captura se apaga casi por completo
-(deep sleep) para maximizar la autonomía con pilas AA. No hay dashboard ni
+(deep sleep) para maximizar la autonomía con baterías Li-ion. No hay dashboard ni
 servidor HTTP local: eso era la arquitectura anterior (ver "Migración" abajo).
 
 Hay **3 unidades físicas** (`CAM-001`, `CAM-002`, `CAM-003`), mismo código
@@ -85,11 +85,13 @@ esp32cam/                       ← carpeta = nombre del .ino (lo exigen IDE y C
 ├── provision.example.json      Plantilla de la línea de aprovisionamiento (WiFi + Fog)
 ├── provision.local.json        La real, por placa/red — gitignored
 ├── scripts/provision.ps1       Envía la línea por serie (reinicia la placa por RTS)
+├── tools/battery_monitor/      Sketch aparte de banco: AP propio + web con la batería (copia la recta)
 └── src/
     ├── camera/camera_module.*  OV2640: init, captura, PWDN + hold para deep sleep
     ├── wifi/wifi_module.*      Estación: conexión con timeout, MAC, IP fija, apagado
     ├── upload/upload_module.*  POST multipart/form-data (foto + telemetría) a la Raspberry Pi
     ├── ota/ota_module.*        FW_VERSION/partición en el log, rollback (sin cliente OTA aún)
+    ├── battery/battery_module.*  Tensión del pack por GPIO13 (ADC2, antes del WiFi) y %
     ├── settings/settings_module.*   ÚNICA puerta a la NVS (Preferences), esquema completo
     └── provision/provision_module.* Lee/valida la línea JSON por serie y la guarda vía settings
 ```
@@ -149,10 +151,15 @@ campos de telemetría acordados con el Fog (todos texto, todos opcionales para
 | `wifi_fail_streak` | ciclos seguidos sin WiFi **antes** de este (`RTC_DATA_ATTR`; se pone a 0 al conectar, después de leerlo) |
 | `framesize` | nombre del enum aplicado de verdad (`SVGA`, o `QVGA` si falta PSRAM) |
 | `jpeg_quality` | calidad aplicada de verdad (10–63) |
+| `battery_valid` | `true`/`false`: la lectura de GPIO13 cae dentro de 2,5–4,5 V |
+| `battery_mv` | tensión del pack en reposo, mV (solo si `battery_valid` es `true`) |
 
-**No** se envían `battery_mv`, `battery_load_mv` ni `battery_valid`: el Fog
-los sigue declarando, pero el firmware ya no mide la batería. Ningún campo
-nuevo (timestamp, batería…) sin confirmarlo antes con el backend. El `.ino`
+**No** se envía el porcentaje: el Fog guarda medidas y deriva el % al leer
+(su README dice que ignora `battery_percent`), así que una curva nueva no
+invalida el histórico. El % solo sale en el log serie. Tampoco
+`battery_load_mv`: GPIO13 es ADC2 y no se puede leer con el WiFi
+transmitiendo. Ningún campo nuevo (timestamp, % de batería…) sin
+confirmarlo antes con el backend. El `.ino`
 recoge los valores y se los pasa a `upload_frame()` en un `UploadTelemetry`
 (`upload_module.h`); el módulo de subida solo los serializa.
 
@@ -164,10 +171,19 @@ Esto ya costó una corrección. No repetir los errores.
 cámara) y `GPIO22 = PCLK`. El OV2640 ocupa:
 `0, 5, 18, 19, 21, 22, 23, 25, 26, 27, 32, 34, 35, 36, 39`.
 
-**Sin medida de batería.** Se quitó el ADS1115 (y su driver) a petición del
-usuario. Si vuelve: no hay ADC nativo usable (la cámara ocupa ADC1 salvo
-GPIO33, que lleva el LED rojo en paralelo; ADC2 no funciona con WiFi), así que
-haría falta un ADC externo. GPIO14/15 están libres (no hay microSD).
+**Batería por GPIO13 (ADC2).** Alimentación: una celda 18650 (1S,
+3,0–4,2 V) → TP4056 con protección → MT3608 a 5,0 V → pin `5V` → AMS1117.
+Divisor 100k/100k desde VIN+ del MT3608 a GPIO13, 100 nF a GND (se quitó el
+ADS1115 y las pilas AA). El ADC2 **sí** sirve si se lee antes de
+`wifi_connect()`: lo que no funciona es leerlo con el WiFi encendido.
+En GPIO13 solo está el divisor: `V13 = Vbat/2` (1,50–2,10 V, zona lineal del
+ADC a 12 dB). Un handoff anterior suponía un pull-up de 47k en la placa que
+llevaba a `0,242·Vbat + 1,70 V`; medido en la placa real el 2026-10-13, no
+es así (con aquellos defectos una celda de ~3,9 V salía como 1,06 V). Se
+calibra igual con dos puntos por el error de ganancia/offset del ADC de cada
+chip; va en la NVS (`batteryCal`). No hay microSD: si
+vuelve, solo en modo 1 bit (`SD_MMC.begin("/sdcard", true)`), porque en 4
+bits usa GPIO13. GPIO14/15 están libres.
 **GPIO12 nunca** para un bus con pull-up: strapping MTDI, impide arrancar.
 
 **GPIO32 (PWDN de la cámara) es RTC-capable.** El deep sleep del ESP32 apaga
@@ -190,6 +206,9 @@ Contrato C del plan: una línea JSON por el puerto serie, una vez por placa.
 {"cmd":"erase"}        ← borra el namespace del proyecto y vuelve a pedir aprovisionar
 ```
 
+Opcional: `"batteryCal":{"adcA":…,"batA":…,"adcB":…,"batB":…}` (mV en GPIO13
+y mV reales del pack, dos puntos). Al reaprovisionar puede ir sola.
+
 Respuestas, siempre con `Serial` directo (no `LOG()`: son protocolo y deben
 salir aunque `DEBUG_ENABLED` sea 0): `PROV: READY …` (escuchando),
 `PROV: OK …` (guardado, reinicia) y `PROV: ERROR <motivo>` (sigue escuchando).
@@ -211,7 +230,9 @@ valida todo antes de escribir nada y se escribe el Fog **antes** que la WiFi:
 la WiFi es la que marca la placa como aprovisionada, así que un corte entre
 las dos escrituras deja la placa pidiendo aprovisionar de nuevo, no a medias.
 `fogHost`/`fogPort` son opcionales: sin ellos se usan los defectos de
-`config.h`. La contraseña nunca sale por el serie.
+`config.h`. `batteryCal`: los cuatro enteros, `adc*` ≤ 3300, `bat*` en
+2500–4500, B por encima de A en ≥ 300 mV de batería y ≥ 30 mV de ADC. La
+contraseña nunca sale por el serie.
 
 **NVS** (`settings_module`, namespace `SETTINGS_NVS_NAMESPACE`): esquema
 completo desde E6 (WiFi activa, WiFi pendiente + intentos + revisión
@@ -240,8 +261,13 @@ A diferencia de la arquitectura anterior (servidor siempre disponible, deep
 sleep inviable), ahora **sí** se usa deep sleep entre capturas: no hay nada
 que servir entre ciclos.
 
-- Cada ciclo: NVS (WiFi, Fog) → cámara → WiFi STA → capturar → POST → apagar
-  cámara (PWDN + hold) → WiFi off → `esp_deep_sleep_start()`.
+- Cada ciclo: NVS (WiFi, Fog, calibración) → batería → cámara → WiFi STA →
+  capturar → POST → apagar cámara (PWDN + hold) → WiFi off →
+  `esp_deep_sleep_start()`.
+- Corte por batería baja: por debajo de `BATTERY_CUTOFF_MV` (3,3 V) se duerme
+  sin encender cámara ni WiFi, y no se vuelve a transmitir hasta superar
+  `BATTERY_RESUME_MV` (3,4 V; histéresis en `RTC_DATA_ATTR`). Con una lectura
+  no válida (placa sin divisor, USB sin celda) **no** se corta.
 - `camera_power_down()` apaga el sensor también si no se llegó a iniciar
   (placa sin aprovisionar o init fallido): si no, dormiría con la cámara
   alimentada y PWDN flotando.
@@ -261,7 +287,7 @@ que servir entre ciclos.
 - Los comentarios explican **por qué**, no qué. Mucho de este código tiene
   decisiones contraintuitivas por las restricciones del hardware.
 - Logs con el macro `LOG()` de `config.h`, prefijados por subsistema:
-  `CAM:`, `WIFI:`, `UPLOAD:`, `OTA:`, `NVS:`, `PROV:`, `POWER:`, `SLEEP:`.
+  `CAM:`, `WIFI:`, `UPLOAD:`, `OTA:`, `NVS:`, `PROV:`, `POWER:`, `BAT:`, `SLEEP:`.
   Las respuestas del protocolo de aprovisionamiento (`PROV: READY/OK/ERROR`)
   no usan `LOG()` sino `Serial` directo.
 

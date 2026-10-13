@@ -15,8 +15,12 @@
  * que no sepa leer (la foto nunca se pierde por la telemetria).
  *
  * La rellena el .ino, que es quien orquesta el ciclo y conoce a todos los
- * modulos; este modulo solo la serializa. Sin campos de bateria: el
- * firmware ya no la mide (se quito el ADS1115). */
+ * modulos; este modulo solo la serializa.
+ *
+ * Bateria: battery_mv (en reposo, antes de encender camara y WiFi) y
+ * battery_valid. NO se envia el porcentaje: el Fog guarda medidas y deriva
+ * el % al leer (no lo acepta como campo). Tampoco battery_load_mv: GPIO13 es
+ * ADC2 y no se puede leer con el WiFi transmitiendo. */
 struct UploadTelemetry {
   int         fw_version;        // FW_VERSION de config.h
   int         rssi;              // dBm, WiFi.RSSI()
@@ -28,6 +32,8 @@ struct UploadTelemetry {
   uint32_t    wifi_fail_streak;  // ciclos seguidos sin WiFi antes de este
   const char *framesize;         // "SVGA", "QVGA"... la aplicada de verdad
   int         jpeg_quality;      // 10..63, la aplicada de verdad
+  bool        battery_valid;     // false: battery_mv no se envia
+  int32_t     battery_mv;        // tension del pack en reposo, mV
 };
 
 /* POST multipart/form-data del frame al Fog (la camara la resuelve el Fog

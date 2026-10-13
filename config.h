@@ -211,6 +211,64 @@
  * tienes un condensador de 470-1000 uF en el rail de 5 V.                   */
 #define POWER_DISABLE_BROWNOUT     0
 
+/* --- Bateria: divisor 100k/100k desde el pack Li-ion 1S hasta GPIO13 -------
+ *
+ *  GPIO13 es ADC2: el WiFi se lo queda en cuanto arranca, asi que se lee
+ *  ANTES de wifi_connect(). Al despertar del deep sleep la radio esta apagada.
+ *
+ *  En GPIO13 solo esta el divisor (sin pull-up que lo desplace: medido en
+ *  la placa real, 2026-10-13), asi que V13 = Vbat/2: 1500 mV con 3,0 V y
+ *  2100 mV con 4,2 V. Todo el rango cae por debajo de ~2450 mV, donde el
+ *  ADC a 12 dB es lineal, y 1 mV de error en el ADC son 2 mV de bateria.
+ *
+ *  Aun asi se calibra con DOS puntos y no con "x2": el ADC del ESP32 tiene
+ *  error de ganancia y de offset propios de cada chip (decenas de mV aun con
+ *  la calibracion de fabrica del eFuse), y las resistencias del 1 % tambien
+ *  desplazan la razon. Precision esperable tras calibrar: +-20-30 mV,
+ *  ~+-5 % de carga en la zona plana de la curva.
+ *
+ *  La calibracion es propia de cada placa: va en la NVS (clave bat_cal,
+ *  "batteryCal" del JSON de aprovisionamiento). Estos son solo los DEFECTOS,
+ *  la razon nominal 1/2.                                                    */
+#define BATTERY_ADC_PIN              13
+#define BATTERY_ADC_SAMPLES          32     // promedio: ~70 ms con la pausa
+#define BATTERY_ADC_SAMPLE_GAP_MS    2      // deja recargar el 100 nF entre muestras
+
+#define BATTERY_CAL_ADC_A_MV_DEFAULT 1500   // punto A: mV en GPIO13 ...
+#define BATTERY_CAL_BAT_A_MV_DEFAULT 3000   //          ... con este pack (mV)
+#define BATTERY_CAL_ADC_B_MV_DEFAULT 2100   // punto B
+#define BATTERY_CAL_BAT_B_MV_DEFAULT 4200
+
+/* Un punto de calibracion se rechaza al aprovisionar si los dos estan tan
+ * cerca que la pendiente sale mal condicionada: con 5 mV de ruido en el ADC
+ * y solo 30 mV entre puntos, la pendiente ya tendria un 17 % de error. */
+#define BATTERY_CAL_MIN_BAT_SPAN_MV  300
+#define BATTERY_CAL_MIN_ADC_SPAN_MV  30
+#define BATTERY_CAL_ADC_MAX_MV       3300   // fondo de escala del pin
+
+/* Fuera de esta ventana la lectura no es de un pack Li-ion 1S conectado:
+ * placa alimentada por USB sin celda (VIN+ del MT3608 a 0 V: el ADC lee ~0
+ * y esas muestras cuentan como fallidas) o sin divisor (GPIO13 al aire, la
+ * lectura es ruido). Se envia battery_valid=false y NO se aplica el corte:
+ * sin una medida fiable es mejor intentar el ciclo que dormir siempre. El
+ * DW01 del TP4056 desconecta la celda por debajo de ~2,5 V. */
+#define BATTERY_VALID_MIN_MV         2500
+#define BATTERY_VALID_MAX_MV         4500
+
+/* Corte por bateria baja: no se enciende ni la camara ni el WiFi. Con
+ * histeresis: una celda Li-ion recupera 50-100 mV en reposo tras un corte,
+ * asi que con un solo umbral la placa alternaria ciclo si / ciclo no justo
+ * en el limite. Una vez cortada, solo vuelve a transmitir por encima de
+ * BATTERY_RESUME_MV (la carga solar de dia la devuelve sola). */
+#define BATTERY_CUTOFF_MV            3300
+#define BATTERY_RESUME_MV            3400
+
+/* Curva de descarga Li-ion en reposo (mV -> %), interpolada linealmente.
+ * Solo para el log serie: al Fog viaja la tension, y el porcentaje se deriva
+ * alli al leer, para que recalibrar la curva no invalide el historico.  */
+#define BATTERY_CURVE_MV   { 3000, 3300, 3500, 3650, 3750, 3850, 4000, 4200 }
+#define BATTERY_CURVE_PCT  {    0,    3,   12,   30,   45,   60,   80,  100 }
+
 /* ===========================================================================
  * 7. ALMACEN EN NVS  -  la configuracion propia de cada placa
  *
