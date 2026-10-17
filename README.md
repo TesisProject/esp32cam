@@ -238,17 +238,39 @@ el deep sleep es inviable porque se pierde la asociación WiFi), aquí **no hay
 nada que servir entre capturas**: el dispositivo despierta, sube una foto y
 vuelve a dormir.
 
-| Estado | Corriente aproximada | Duración por ciclo |
-|---|---|---|
-| Deep sleep | microamperios | ~5 min (`CAPTURE_INTERVAL_MS`) |
-| Despierto: cámara + WiFi + POST | ~150–200 mA | 2–5 s típico |
+Estimación **sin medir todavía** (hay que confirmarla con un amperímetro en
+serie con la celda). Corrientes vistas desde la celda (3,7 V), con el MT3608
+a ~85 % de rendimiento:
 
-Con un ciclo de ~3 s despierto cada 5 minutos, el consumo medio está dominado
-casi por completo por la corriente de deep sleep (microamperios), muy por
-debajo de los ~85 mA continuos de la arquitectura anterior con servidor
-siempre disponible. La autonomía real depende sobre todo de la autodescarga
-de la batería y de las pérdidas del MT3608 y del AMS1117 más que del
-consumo activo del ESP32.
+| Estado | En el pin 5V | Desde la celda | Duración por ciclo | Carga por ciclo |
+|---|---|---|---|---|
+| Deep sleep | ~3–6 mA | **~6–12 mA** | ~296 s | ~0,5–1,0 mAh |
+| Despierto: cámara + WiFi + POST | ~150–200 mA | ~250–320 mA | ~3–5 s | ~0,25–0,45 mAh |
+
+**El deep sleep no es de microamperios en esta placa.** El chip ESP32
+duerme en ~10 µA, pero la AI-Thinker lleva un AMS1117 (varios mA de
+corriente de reposo) y la PSRAM y el sensor siguen alimentados por el mismo
+rail de 3,3 V; el MT3608, con tan poca carga, además rinde mal. Por eso, a 5
+minutos, **el reposo pesa más que el ciclo activo**. Ninguna optimización del
+firmware baja de ahí: haría falta cambiar el hardware (un regulador LDO de
+baja corriente de reposo, o cortar la alimentación de la placa entre ciclos
+con un temporizador externo tipo TPL5110).
+
+Consumo medio estimado: **~9–17 mAh por hora (~220–400 mAh/día)**.
+
+| Batería (18650 de ~2500 mAh, ~90 % útil hasta el corte de 3,3 V) | A 5 min | A 30 s (pruebas) |
+|---|---|---|
+| 1 celda (1S1P) | ~5–10 días | ~1,5–3 días |
+| 4 celdas en paralelo (1S4P) | ~3–6 semanas | ~6–12 días |
+
+**Varias celdas: siempre en paralelo.** El firmware no cambia: la tensión
+sigue siendo la de una celda (3,0–4,2 V), así que el divisor, la
+calibración, la curva de porcentaje y el corte valen igual; solo cambia la
+capacidad. Las celdas deben unirse con la misma tensión (diferencia menor de
+~0,1 V), o la más cargada descarga a la otra con corrientes muy altas.
+En serie no: 4S son 12–16,8 V, el TP4056 solo carga 1S, el MT3608 solo
+eleva tensión y el divisor pondría 6–8,4 V en GPIO13 (el máximo es 3,6 V).
+Con 4 celdas el TP4056 (1 A) tarda ~10–12 h en una carga completa.
 
 **Para pruebas de campo**: bajar `CAPTURE_INTERVAL_MS` a 30000 (30 s) para no
 esperar 5 minutos entre cada verificación, y devolverlo a 300000 antes de

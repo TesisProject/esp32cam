@@ -124,7 +124,9 @@
 // Si el ESP32 no logra resolver ".local" en estacion, aprovisionar la placa
 // con la IP de la Pi en fogHost (p. ej. "192.168.1.20").
 
-#define CAPTURE_INTERVAL_MS     30000UL    // 30 segundos entre capturas (deep sleep)
+/* 5 min en campo. Bajarlo a 30000 solo en el banco: a 30 s el ciclo activo
+ * pasa a dominar y el consumo medio se multiplica por ~3-4 (README, seccion 5). */
+#define CAPTURE_INTERVAL_MS     300000UL   // 5 minutos entre capturas (deep sleep)
 
 /* ===========================================================================
  * 4. LED DE ESTADO  -  rojo integrado en GPIO33
@@ -273,15 +275,17 @@
  * 7. ALMACEN EN NVS  -  la configuracion propia de cada placa
  *
  *  src/settings/settings_module.* es la UNICA puerta a la NVS. El esquema
- *  completo (WiFi activa y pendiente, Fog, credencial, captura, revision,
- *  OTA rechazada) existe desde E6 aunque de momento solo se usen WiFi y Fog.
+ *  completo (WiFi, Fog, credencial, captura, revision, OTA rechazada) existe
+ *  desde E6 aunque de momento solo se usen WiFi, Fog y bateria.
  *  Tamanos maximos de lo que se guarda: fijan el tamano de los blobs, asi
  *  que cambiarlos invalida lo ya guardado (ver SETTINGS_SCHEMA_VERSION).
  * ==========================================================================*/
 #define SETTINGS_NVS_NAMESPACE     "parkvision"   // max. 15 caracteres (limite NVS)
-#define SETTINGS_SCHEMA_VERSION    1    // subirlo si cambia la forma de un blob:
-                                        // la NVS antigua se borra al arrancar en
-                                        // vez de leer basura
+/* Subirlo solo si cambia la forma de un blob: al arrancar, la placa borra
+ * todo su namespace MENOS lo grabado por USB (WiFi, Fog, calibracion). Con OTA
+ * eso pasa en todas las camaras a la vez y se pierde credencial, captura... Preferible: dato nuevo = clave nueva
+ * (asi se anadio bat_cal) y dejar esto en 1. */
+#define SETTINGS_SCHEMA_VERSION    1
 
 #define CAM_CODE_MAX_LEN           15   // "CAM-001"
 #define API_SECRET_MAX_LEN         63   // X-API-Key / X-API-Token del Fog

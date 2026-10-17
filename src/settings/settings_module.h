@@ -5,21 +5,28 @@
  *  otro modulo abre la NVS: asi el esquema esta en un solo sitio y se puede
  *  versionar (SETTINGS_SCHEMA_VERSION en config.h).
  *
- *  Esquema completo desde E6, aunque E6 solo use WiFi activa y Fog:
+ *  Esquema completo desde E6, aunque E6 solo use WiFi y Fog:
  *
  *    clave       tipo   contenido                                  usa
  *    ---------   ----   ----------------------------------------   ---
  *    schema      u8     version del esquema                        E6
- *    wifi        blob   WiFi activa (SettingsWifi)                 E6
- *    wifi_pend   blob   WiFi pendiente + revision que la trajo     E8
- *    wifi_tries  u8     intentos fallidos con la pendiente         E8
- *    wifi_rej    u32    revision cuya WiFi se descarto (no repetir) E8
- *    fog         blob   host y puerto del Fog (SettingsFog)        E6
+ *    wifi        blob   WiFi (SettingsWifi), CONGELADO             E6
+ *    fog         blob   host y puerto del Fog (SettingsFog), CONG.  E6
  *    cred        blob   codigo de camara + API key/token           E7
  *    capture     blob   intervalo, framesize, calidad              E8
  *    cfg_rev     u32    ultima revision de config aplicada         E8
  *    ota_rej     u32    version OTA rechazada por rollback         E5
- *    bat_cal     blob   calibracion del divisor de bateria         bateria
+ *    bat_cal     blob   calibracion del divisor de bateria, CONG.  bateria
+ *
+ *  wifi, fog y bat_cal (CONG. = congelados) solo se graban por USB y ningun
+ *  cambio de esquema los borra (ver reset_keeping_usb_keys() en el .cpp): ni
+ *  el Fog ni la nube los cambian (decision del 2026-10-17). Las claves wifi_pend,
+ *  wifi_tries y wifi_rej del plan E8 se retiraron sin llegar a escribirse;
+ *  no reutilizar esos nombres para otra cosa.
+ *
+ *  Dato nuevo = clave NUEVA. No cambiar la forma de un blob existente: eso
+ *  obliga a subir SETTINGS_SCHEMA_VERSION, y el resto (credencial, captura...)
+ *  se pierde en todas las placas a la vez al llegar el firmware por OTA.
  *
  *  bat_cal se anadio despues de E6 como clave NUEVA, sin tocar la forma de
  *  ningun blob: una placa ya aprovisionada no la tiene y usa los defectos,
@@ -36,20 +43,21 @@
 #include <Arduino.h>
 #include "../../config.h"
 
+/* wifi, fog y bat_cal: CONGELADOS. Si cambiase su tamano, la NVS de las
+ * placas ya no encajaria y reset_keeping_usb_keys() los descartaria: habria
+ * que reaprovisionar cada placa por USB. 32 + 63 son los maximos de WPA2 y
+ * 63 los de un nombre de host razonable: no hay motivo para cambiarlos. */
 struct SettingsWifi {
   char ssid[WIFI_SSID_MAX_LEN + 1];
   char password[WIFI_PASS_MAX_LEN + 1];
 };
-
-struct SettingsPendingWifi {
-  SettingsWifi wifi;
-  uint32_t     revision;      // revision de la config del Fog que la trajo
-};
+static_assert(sizeof(SettingsWifi) == 97, "SettingsWifi esta congelado: ver el comentario");
 
 struct SettingsFog {
   char     host[FOG_HOST_MAX_LEN + 1];
   uint16_t port;
 };
+static_assert(sizeof(SettingsFog) == 66, "SettingsFog esta congelado: ver SettingsWifi");
 
 struct SettingsCredential {
   char camera_code[CAM_CODE_MAX_LEN + 1];
@@ -65,6 +73,7 @@ struct SettingsBatteryCal {
   uint16_t adc_b_mv;
   uint16_t bat_b_mv;
 };
+static_assert(sizeof(SettingsBatteryCal) == 8, "SettingsBatteryCal esta congelado: ver SettingsWifi");
 
 struct SettingsCapture {
   uint32_t interval_s;
@@ -77,19 +86,10 @@ struct SettingsCapture {
  * aprovisionar que interpretar blobs de otra forma. false = NVS inusable. */
 bool settings_begin();
 
-/* --- WiFi activa (E6) ------------------------------------------------------*/
+/* --- WiFi (E6). Solo la escribe el aprovisionamiento por USB --------------*/
 bool settings_has_wifi();
 bool settings_get_wifi(SettingsWifi &out);
 bool settings_set_wifi(const SettingsWifi &wifi);
-
-/* --- WiFi pendiente (E8): se prueba y solo se promociona tras un 2xx -------*/
-bool    settings_get_pending_wifi(SettingsPendingWifi &out);
-bool    settings_set_pending_wifi(const SettingsPendingWifi &pending);
-uint8_t settings_pending_wifi_tries();
-bool    settings_set_pending_wifi_tries(uint8_t tries);
-bool    settings_promote_pending_wifi();   // pendiente -> activa
-bool    settings_discard_pending_wifi();   // y recuerda su revision como rechazada
-uint32_t settings_rejected_wifi_revision(); // 0 = ninguna
 
 /* --- Fog (E6). Sin valor en la NVS, devuelve los defectos de config.h ------
  * Devuelve true si el valor viene de la NVS y false si son los defectos. */

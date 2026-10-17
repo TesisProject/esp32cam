@@ -1,9 +1,9 @@
 /* ============================================================================
  *  settings_module.cpp  -  Esquema de la NVS sobre Preferences (core ESP32)
  *
- *  Los nombres de clave son el esquema: no renombrarlos sin subir
- *  SETTINGS_SCHEMA_VERSION (config.h), o una placa ya aprovisionada dejaria
- *  de encontrar su WiFi. Limite de la NVS: 15 caracteres por clave.
+ *  Los nombres de clave son el esquema. "schema", "wifi", "fog" y "bat_cal"
+ *  no se renombran NUNCA: una placa en campo dejaria de encontrarlos y solo
+ *  se arregla por USB. Limite de la NVS: 15 caracteres por clave.
  *
  *  En un ciclo normal este modulo solo LEE: no se escribe la flash en cada
  *  despertar (la NVS reparte el desgaste, pero no hay por que gastarlo).
@@ -11,12 +11,10 @@
 #include "settings_module.h"
 
 #include <Preferences.h>
+#include <nvs.h>
 
 static const char *kKeySchema     = "schema";
 static const char *kKeyWifi       = "wifi";
-static const char *kKeyWifiPend   = "wifi_pend";
-static const char *kKeyWifiTries  = "wifi_tries";
-static const char *kKeyWifiRej    = "wifi_rej";
 static const char *kKeyFog        = "fog";
 static const char *kKeyCred       = "cred";
 static const char *kKeyCapture    = "capture";
@@ -63,6 +61,70 @@ template <size_t N>
 static void terminate(char (&s)[N]) { s[N - 1] = '\0'; }
 
 /* ---------------------------------------------------------------------------
+ * Cambio de esquema: se borra todo MENOS lo que solo se graba por USB
+ *
+ * WiFi, host del Fog y calibracion de bateria solo llegan por el
+ * aprovisionamiento USB (decision del 2026-10-17: ni el Fog ni la nube
+ * cambian la WiFi, y el host nunca vino de la red). Si un firmware nuevo,
+ * llegado por OTA, los borrase, la camara ya no encontraria la red o el Fog,
+ * ni podria recibir otro OTA que lo arreglase: habria que ir a cada placa con
+ * un cable. Lo demas (credencial E7, captura E8...) se vuelve a pedir al Fog.
+ *
+ * Se borran las claves una a una (no clear() + reescribir: un corte entre las
+ * dos dejaria la placa sin WiFi) y el esquema se escribe al final. Si se
+ * corta a medias, el siguiente arranque ve el esquema viejo y repite; borrar
+ * es idempotente. Funciona igual en un downgrade (rollback del OTA a un
+ * firmware con esquema menor), siempre que ese firmware tambien tenga esta
+ * funcion: el de E6 (6066aa6) aun hacia clear().
+ * -------------------------------------------------------------------------*/
+struct UsbKey { const char *key; size_t size; };
+/* Sus structs estan CONGELADOS (static_assert en el .h). */
+static const UsbKey kUsbKeys[] = {
+  { kKeyWifi,   sizeof(SettingsWifi) },
+  { kKeyFog,    sizeof(SettingsFog) },
+  { kKeyBatCal, sizeof(SettingsBatteryCal) },
+};
+
+static bool is_usb_key(const char *key) {
+  for (const UsbKey &k : kUsbKeys) if (strcmp(key, k.key) == 0) return true;
+  return false;
+}
+
+static void reset_keeping_usb_keys() {
+  static const size_t kMaxKeys = 32;   // el esquema tiene ~10 claves
+  char keys[kMaxKeys][NVS_KEY_NAME_MAX_SIZE];
+  size_t n = 0;
+
+  /* Primero se recogen los nombres y luego se borra: modificar la NVS con un
+   * iterador abierto no esta garantizado. */
+  nvs_iterator_t it = nullptr;
+  esp_err_t err = nvs_entry_find(NVS_DEFAULT_PART_NAME, SETTINGS_NVS_NAMESPACE,
+                                 NVS_TYPE_ANY, &it);
+  while (err == ESP_OK && n < kMaxKeys) {
+    nvs_entry_info_t info;
+    nvs_entry_info(it, &info);
+    if (strcmp(info.key, kKeySchema) != 0 && !is_usb_key(info.key)) {
+      strlcpy(keys[n++], info.key, NVS_KEY_NAME_MAX_SIZE);
+    }
+    err = nvs_entry_next(&it);
+  }
+  nvs_release_iterator(it);
+
+  for (size_t i = 0; i < n; i++) s_prefs.remove(keys[i]);
+
+  /* Un blob de otro tamano no es de este esquema: no se puede leer. No
+   * deberia pasar nunca (structs congelados). */
+  for (const UsbKey &k : kUsbKeys) {
+    if (s_prefs.isKey(k.key) && s_prefs.getBytesLength(k.key) != k.size) {
+      LOG("NVS: '%s' con %u bytes, no es de este esquema: se borra",
+          k.key, (unsigned)s_prefs.getBytesLength(k.key));
+      s_prefs.remove(k.key);
+    }
+  }
+  s_prefs.putUChar(kKeySchema, SETTINGS_SCHEMA_VERSION);
+}
+
+/* ---------------------------------------------------------------------------
  * Apertura
  * -------------------------------------------------------------------------*/
 bool settings_begin() {
@@ -78,11 +140,10 @@ bool settings_begin() {
   const uint8_t schema = s_prefs.getUChar(kKeySchema, 0);
   if (schema != SETTINGS_SCHEMA_VERSION) {
     if (schema != 0) {
-      LOG("NVS: esquema %u != %u, se borra y habra que aprovisionar de nuevo",
+      LOG("NVS: esquema %u != %u, se borra todo salvo WiFi, Fog y calibracion",
           (unsigned)schema, (unsigned)SETTINGS_SCHEMA_VERSION);
     }
-    s_prefs.clear();
-    s_prefs.putUChar(kKeySchema, SETTINGS_SCHEMA_VERSION);
+    reset_keeping_usb_keys();
   }
   return true;
 }
@@ -103,50 +164,6 @@ bool settings_has_wifi() {
 }
 
 bool settings_set_wifi(const SettingsWifi &wifi) { return put_blob(kKeyWifi, wifi); }
-
-/* ---------------------------------------------------------------------------
- * WiFi pendiente (E8)
- * -------------------------------------------------------------------------*/
-bool settings_get_pending_wifi(SettingsPendingWifi &out) {
-  if (!get_blob(kKeyWifiPend, out)) return false;
-  terminate(out.wifi.ssid);
-  terminate(out.wifi.password);
-  return out.wifi.ssid[0] != '\0';
-}
-
-bool settings_set_pending_wifi(const SettingsPendingWifi &pending) {
-  /* Una pendiente nueva empieza sin intentos fallidos. */
-  return put_blob(kKeyWifiPend, pending) && settings_set_pending_wifi_tries(0);
-}
-
-uint8_t settings_pending_wifi_tries() {
-  return s_open ? s_prefs.getUChar(kKeyWifiTries, 0) : 0;
-}
-
-bool settings_set_pending_wifi_tries(uint8_t tries) {
-  return s_open && s_prefs.putUChar(kKeyWifiTries, tries) == sizeof(uint8_t);
-}
-
-bool settings_promote_pending_wifi() {
-  SettingsPendingWifi p;
-  if (!settings_get_pending_wifi(p)) return false;
-  /* Primero la activa: si se corta aqui, en el peor caso queda la pendiente
-   * repetida, nunca la placa sin WiFi. */
-  if (!settings_set_wifi(p.wifi)) return false;
-  return remove_key(kKeyWifiPend) && remove_key(kKeyWifiTries);
-}
-
-bool settings_discard_pending_wifi() {
-  SettingsPendingWifi p;
-  if (settings_get_pending_wifi(p)) {
-    s_prefs.putUInt(kKeyWifiRej, p.revision);
-  }
-  return remove_key(kKeyWifiPend) && remove_key(kKeyWifiTries);
-}
-
-uint32_t settings_rejected_wifi_revision() {
-  return s_open ? s_prefs.getUInt(kKeyWifiRej, 0) : 0;
-}
 
 /* ---------------------------------------------------------------------------
  * Fog

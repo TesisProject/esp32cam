@@ -231,8 +231,10 @@ void provision_listen(uint32_t window_ms, bool wifi_required) {
   while (millis() - start < window_ms) {
     while (Serial.available()) {
       const int c = Serial.read();
-      if (c == '\r') continue;
-      if (c != '\n') {
+      /* Fin de linea: CR, LF o CRLF. El script manda LF, pero el monitor
+       * serie del IDE manda solo CR por defecto. El segundo caracter de un
+       * CRLF deja una linea vacia, que se ignora (len == 0). */
+      if (c != '\r' && c != '\n') {
         if (len < PROV_LINE_MAX_LEN) s_line[len++] = (char)c;
         else overflow = true;
         continue;

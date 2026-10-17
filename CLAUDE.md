@@ -18,8 +18,11 @@ propio `secrets.h` (`DEVICE_ID`/`API_KEY`/`API_TOKEN`) al flashearla.
 
 **Rumbo (decisión del 2026-10-12):** toda la configuración se define en la
 nube, el Fog la descarga y cada ESP32 lee la suya del Fog; un único `.bin`
-para las tres cámaras, sin secretos dentro. Plan y contratos:
-`../delegacion-cambios-2026-10-11.md` (E6 hecho; E7, E8 y E5 pendientes).
+para las tres cámaras, sin secretos dentro. **Excepción (2026-10-17): la
+WiFi y el host del Fog solo se graban por USB**, nunca por red (ver "OTA y
+configuración por USB"). Plan y contratos:
+`../delegacion-cambios-2026-10-11.md`, revisión 3 (E6 hecho; E7, E8 y E5
+pendientes).
 
 El sketch está en la raíz del repo (`esp32cam.ino`). El sketch original
 (fotos a microSD) se eliminó del repo en `d17d837`.
@@ -86,6 +89,7 @@ esp32cam/                       ← carpeta = nombre del .ino (lo exigen IDE y C
 ├── provision.local.json        La real, por placa/red — gitignored
 ├── scripts/provision.ps1       Envía la línea por serie (reinicia la placa por RTS)
 ├── tools/battery_monitor/      Sketch aparte de banco: AP propio + web con la batería (copia la recta)
+├── tools/wifi_rssi/            Sketch aparte: RSSI de la red (serie + web + LED); lee la WiFi de la NVS
 └── src/
     ├── camera/camera_module.*  OV2640: init, captura, PWDN + hold para deep sleep
     ├── wifi/wifi_module.*      Estación: conexión con timeout, MAC, IP fija, apagado
@@ -235,13 +239,12 @@ las dos escrituras deja la placa pidiendo aprovisionar de nuevo, no a medias.
 contraseña nunca sale por el serie.
 
 **NVS** (`settings_module`, namespace `SETTINGS_NVS_NAMESPACE`): esquema
-completo desde E6 (WiFi activa, WiFi pendiente + intentos + revisión
-rechazada, Fog, credencial, captura, `cfg_rev`, versión OTA rechazada); la
-tabla de claves está en `settings_module.h`. Cada grupo que se escribe junto
-es un blob (escritura atómica). Si cambia la forma de un blob, subir
-`SETTINGS_SCHEMA_VERSION`: la placa borra su namespace y pide aprovisionar,
-en vez de leer basura. En un ciclo normal solo se lee: no hay escrituras en
-flash por ciclo. `{"cmd":"erase"}` borra solo el namespace del proyecto, no
+completo desde E6 (WiFi, Fog, calibración, credencial, captura, `cfg_rev`,
+versión OTA rechazada); la tabla de claves está en `settings_module.h`. Cada
+grupo que se escribe junto es un blob (escritura atómica). Un cambio de
+`SETTINGS_SCHEMA_VERSION` borra el namespace **salvo** WiFi, Fog y
+calibración: ver "OTA y configuración por USB" antes de tocarlo. En un
+ciclo normal solo se lee: no hay escrituras en flash por ciclo. `{"cmd":"erase"}` borra solo el namespace del proyecto, no
 la NVS del driver WiFi ni la calibración de radio (`WiFi.persistent(false)`:
 el driver no guarda copia del SSID/contraseña).
 
@@ -254,6 +257,66 @@ muestra el log hasta el `SLEEP:`. Escrito sin tildes: Windows PowerShell 5.1
 lee los `.ps1` sin BOM como ANSI. **No ejecutarlo desde una sesión de agente
 contra la placa** sin que el usuario lo pida: reinicia la placa y escribe su
 NVS.
+
+## OTA y configuración por USB — reglas para no dejar cámaras incomunicadas
+
+**Leer antes de tocar `settings_module`, `provision_module`, `config.h`
+(secciones 7 y 8) o cualquier cosa del OTA.** Decisión del usuario del
+2026-10-17.
+
+**El principio:** lo que solo se graba por USB no se puede recuperar a
+distancia. Si un firmware lo borra o lo deja ilegible, la cámara no
+encuentra la red o el Fog, no puede recibir otro OTA que lo arregle, y hay
+que ir a cada placa con un cable. Y por OTA el error llega a **las tres
+cámaras a la vez**.
+
+**Qué se graba solo por USB** (aprovisionamiento, contrato C):
+
+| Clave NVS | Struct | Tamaño congelado |
+|---|---|---|
+| `wifi` | `SettingsWifi` | 97 B |
+| `fog` | `SettingsFog` | 66 B |
+| `bat_cal` | `SettingsBatteryCal` | 8 B |
+
+Lo demás (credencial E7, captura E8, `cfg_rev`, `ota_rej`) se puede volver a
+pedir al Fog: perderlo cuesta un ciclo, no un viaje.
+
+**Reglas:**
+
+1. **La WiFi y el host del Fog nunca llegan por red.** Ni la nube ni el Fog
+   los envían, y el firmware no acepta cambiarlos por HTTP. Si alguien pide
+   añadir `wifi` a `GET /camera/config` o "redes por nodo", recordar esta
+   decisión antes de implementarlo (revisión 3 del plan).
+2. **No cambiar la forma de esos tres structs ni renombrar sus claves** (ni
+   `schema`). Los `static_assert` de `settings_module.h` lo impiden al
+   compilar; no quitarlos para que compile.
+3. **Dato nuevo = clave nueva**, con su defecto cuando no existe (como se
+   hizo con `bat_cal`). Así `SETTINGS_SCHEMA_VERSION` se queda en 1.
+4. **Si de verdad hay que subir `SETTINGS_SCHEMA_VERSION`:**
+   `reset_keeping_usb_keys()` borra todo menos `wifi`, `fog` y `bat_cal`,
+   clave a clave y con el esquema escrito al final (un corte a mitad se
+   repite en el siguiente arranque). Nunca `clear()` del namespace en un
+   cambio de esquema. Una clave nueva grabada por USB se añade a
+   `kUsbKeys` en el `.cpp`, con su `static_assert`.
+5. **Primer OTA:** cada placa tiene que llevar, flasheado por USB, un
+   firmware con `reset_keeping_usb_keys()` **antes** de recibir su primer
+   OTA. El de E6 (`6066aa6`) hace `clear()`: si un OTA fallido hiciera
+   rollback a ese firmware tras un cambio de esquema, borraría la WiFi.
+6. **El cliente OTA (E5) no toca la NVS** salvo `ota_rej`. La NVS es otra
+   partición: escribir `app0`/`app1` no la afecta, y el rollback tampoco.
+7. **No cambiar el esquema de particiones** (Minimal SPIFFS): el OTA no
+   puede cambiarlo, y moverlo puede dejar la NVS ilegible.
+8. **Aprovisionamiento:** `{"cmd":"erase"}` sí borra la WiFi, a propósito,
+   porque solo llega por USB con alguien delante. Nada que llegue por red
+   puede provocar un `settings_erase_all()`.
+9. **Un `FW_VERSION` nuevo por cada binario** que vaya a otra placa, y un
+   firmware OTA solo confirma la imagen (`ota_confirm_if_pending()`) tras un
+   2xx del Fog: si no conecta, el rollback lo devuelve al anterior.
+
+**Prueba antes de publicar un OTA que toque `settings_module`:** en una
+placa aprovisionada, flashear por USB el firmware nuevo y comprobar en el
+log que sigue conectando sin reaprovisionar (`NVS: esquema …` solo si se
+subió el esquema, y después `WIFI: conectado`).
 
 ## Energía — deep sleep real
 
