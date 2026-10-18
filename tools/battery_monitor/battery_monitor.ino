@@ -58,8 +58,8 @@
 #define BATTERY_VALID_MIN_MV         2500
 #define BATTERY_VALID_MAX_MV         4500
 #define BATTERY_CUTOFF_MV            3300
-static const int32_t kCurveMv[]  = { 3000, 3300, 3500, 3650, 3750, 3850, 4000, 4200 };
-static const int     kCurvePct[] = {    0,    3,   12,   30,   45,   60,   80,  100 };
+static const int32_t kCurveMv[]  = { 3300, 3500, 3650, 3750, 3850, 4000, 4200 };
+static const int     kCurvePct[] = {    0,    9,   28,   43,   59,   79,  100 };
 static const size_t  kCurveLen   = sizeof(kCurveMv) / sizeof(kCurveMv[0]);
 
 #define CAM_PIN_PWDN           32

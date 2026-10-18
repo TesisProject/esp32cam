@@ -25,7 +25,7 @@ red (ver "OTA y configuración por USB"). La credencial pasó a USB el mismo
 día a petición del usuario, en lugar del alta por MAC de E7. Plan y
 contratos: `../delegacion-cambios-2026-10-11.md`, revisión 3 (E6 hecho; la
 credencial por USB sustituye a E7 y el contrato C del plan no lo refleja
-aún; E8 y E5 pendientes).
+aún; E5 hecho, E8 pendiente).
 
 El sketch está en la raíz del repo (`esp32cam.ino`). El sketch original
 (fotos a microSD) se eliminó del repo en `d17d837`.
@@ -58,15 +58,15 @@ el esquema hay que forzarlo):
 
 **Por qué Minimal SPIFFS.** Huge APP tiene una sola ranura de app de 3 MB:
 no hay dónde escribir una versión nueva por OTA. Minimal SPIFFS tiene dos
-(`app0`/`app1`) de 1 966 080 B; el firmware ocupa ~1,15 MB (58 %). *Default*
+(`app0`/`app1`) de 1 966 080 B; el firmware ocupa ~1,24 MB (62 %). *Default*
 (1,25 MB por ranura) dejaría ~86 %, demasiado justo. Cambiar de esquema
 obliga a flashear cada placa por USB una vez (cambia la tabla de
 particiones); después, el OTA no puede cambiarla. **No volver a Huge APP**
 sin hablarlo: rompería el OTA y el rollback.
 
-**OTA preparado, no implementado.** `FW_VERSION` (entero, `config.h`) sale en
-el log de arranque junto a la partición activa y viaja al Fog como
-`fw_version`. El rollback del bootloader está activo en el core
+**OTA (E5).** `FW_VERSION` (entero, `config.h`) sale en el log de arranque
+junto a la partición activa y viaja al Fog como `fw_version`. El cliente
+está en `src/ota/` + `src/fogconfig/`; ver la sección "Cliente OTA (E5)". El rollback del bootloader está activo en el core
 (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`): `src/ota/ota_module.cpp`
 sobrescribe `verifyRollbackLater()` (con `extern "C"`: el weak está en un `.c`
 del core) para que el core no valide la imagen al arrancar, y el `.ino` llama
@@ -76,8 +76,8 @@ flasheadas por USB quedan en estado `UNDEFINED` y no se ven afectadas. **Subir
 `FW_VERSION`** en cada binario que vaya a otra placa.
 
 **Sin librerías externas.** Solo lo que trae el core ESP32: `HTTPClient`,
-`Preferences` (NVS) y cJSON (`#include "cJSON.h"`, viene en los libs de
-ESP-IDF del core). No añadir dependencias del Gestor de Librerías sin
+`Preferences` (NVS), `LittleFS` (fotos atrasadas) y cJSON
+(`#include "cJSON.h"`, viene en los libs de ESP-IDF del core). No añadir dependencias del Gestor de Librerías sin
 preguntar: fue un requisito explícito del usuario.
 
 ## Estructura
@@ -91,12 +91,16 @@ esp32cam/                       ← carpeta = nombre del .ino (lo exigen IDE y C
 ├── scripts/provision.ps1       Envía la línea por serie (reinicia la placa por RTS)
 ├── tools/battery_monitor/      Sketch aparte de banco: AP propio + web con la batería (copia la recta)
 ├── tools/wifi_rssi/            Sketch aparte: RSSI de la red (serie + web + LED); lee la WiFi de la NVS
+├── tools/ota_test/             Sketch aparte de banco: recibe un .bin por HTTP (sin auth) para probar OTA y rollback
 └── src/
     ├── camera/camera_module.*  OV2640: init, captura, PWDN + hold para deep sleep
     ├── wifi/wifi_module.*      Estación: conexión con timeout, MAC, IP fija, apagado
     ├── upload/upload_module.*  POST multipart/form-data (foto + telemetría) a la Raspberry Pi
-    ├── ota/ota_module.*        FW_VERSION/partición en el log, rollback (sin cliente OTA aún)
+    ├── ota/ota_module.*        FW_VERSION, rollback y cliente OTA: firma, descarga, instalación
+    ├── fogconfig/fogconfig_module.*  GET /camera/config del Fog (solo el bloque firmware; wifi se ignora)
     ├── battery/battery_module.*  Tensión del pack por GPIO13 (ADC2, antes del WiFi) y %
+    ├── clock/clock_module.*    Hora real con la cabecera Date del Fog; deriva del RTC
+    ├── backlog/backlog_module.*  Fotos no subidas en LittleFS (partición spiffs), cola y reenvío
     ├── settings/settings_module.*   ÚNICA puerta a la NVS (Preferences), esquema completo
     └── provision/provision_module.* Lee/valida la línea JSON por serie y la guarda vía settings
 ```
@@ -134,7 +138,7 @@ volver a introducirlo. `.gitignore` sigue ignorando `secrets.h` solo para
 que una copia antigua con claves reales no acabe en un commit.
 
 **2. Sin librerías externas.** Solo el core ESP32 (`HTTPClient`,
-`Preferences`, cJSON).
+`Preferences`, `LittleFS`, cJSON).
 
 **3. El endpoint de subida es fijo, no inventar campos.** El contrato (ver
 `config.h`, sección 3, y "Contrato de la API" abajo) es un POST multipart a
@@ -156,6 +160,13 @@ campos de telemetría acordados con el Fog (todos texto, todos opcionales para
 | `jpeg_quality` | calidad aplicada de verdad (10–63) |
 | `battery_valid` | `true`/`false`: la lectura de GPIO13 cae dentro de 2,5–4,5 V |
 | `battery_mv` | tensión del pack en reposo, mV (solo si `battery_valid` es `true`) |
+| `captured_at` | **solo en fotos atrasadas** (ver "Fotos atrasadas"): ISO 8601 UTC, `2026-10-18T14:05:12Z`. La foto actual no lo lleva |
+
+Una foto atrasada lleva solo los campos del momento de la captura
+(`fw_version`, `reset_reason`, `framesize`, `jpeg_quality`, batería y
+`captured_at`): `rssi`, `wifi_connect_ms`, `awake_ms`, `free_heap`,
+`wake_count` y `wifi_fail_streak` describirían el ciclo de la subida, no el
+de la foto.
 
 **No** se envía el porcentaje: el Fog guarda medidas y deriva el % al leer
 (su README dice que ignora `battery_percent`), así que una curva nueva no
@@ -184,9 +195,18 @@ ADC a 12 dB). Un handoff anterior suponía un pull-up de 47k en la placa que
 llevaba a `0,242·Vbat + 1,70 V`; medido en la placa real el 2026-10-13, no
 es así (con aquellos defectos una celda de ~3,9 V salía como 1,06 V). Se
 calibra igual con dos puntos por el error de ganancia/offset del ADC de cada
-chip; va en la NVS (`batteryCal`). No hay microSD: si
-vuelve, solo en modo 1 bit (`SD_MMC.begin("/sdcard", true)`), porque en 4
-bits usa GPIO13. GPIO14/15 están libres.
+chip; va en la NVS (`batteryCal`).
+
+**No hay microSD, ni siquiera en modo 1 bit.** En modo 1 bit la SD solo usa
+GPIO14/15/2, pero la pista D3 del slot sigue unida a GPIO13, y toda
+microSD tiene en DAT3 un pull-up interno (10–90 kΩ a 3,3 V) activo desde
+que recibe alimentación. La tarjeta está siempre alimentada (rail de 3,3 V,
+también en deep sleep), así que leer la batería antes de montar la SD no lo
+evita: con 50 kΩ, `V13 = (Vbat + 6,6)/4` (2,40–2,70 V), la mitad de rango y
+fuera de la zona lineal del ADC. Para tener las dos cosas habría que cortar
+la pista DAT3 o mover el divisor a GPIO33 (ADC1, quitando el LED rojo). Las
+fotos atrasadas van a la flash interna (ver "Fotos atrasadas").
+GPIO14/15 están libres.
 **GPIO12 nunca** para un bus con pull-up: strapping MTDI, impide arrancar.
 
 **GPIO32 (PWDN de la cámara) es RTC-capable.** El deep sleep del ESP32 apaga
@@ -331,7 +351,8 @@ sleep inviable), ahora **sí** se usa deep sleep entre capturas: no hay nada
 que servir entre ciclos.
 
 - Cada ciclo: NVS (WiFi, Fog, calibración) → batería → cámara → WiFi STA →
-  capturar → POST → apagar cámara (PWDN + hold) → WiFi off →
+  capturar → POST → (si 2xx: hora del Fog y hasta 3 fotos atrasadas; si no:
+  guardar la foto) → apagar cámara (PWDN + hold) → WiFi off →
   `esp_deep_sleep_start()`.
 - Corte por batería baja: por debajo de `BATTERY_CUTOFF_MV` (3,3 V) se duerme
   sin encender cámara ni WiFi, y no se vuelve a transmitir hasta superar
@@ -348,6 +369,88 @@ que servir entre ciclos.
 - `CAPTURE_INTERVAL_MS` en `config.h` (5 min en campo; bajarlo a 30 s solo
   para pruebas, y devolverlo antes de dejar la cámara desatendida).
 
+## Cliente OTA (E5)
+
+Contrato del Fog (proveedor, fuente de verdad):
+`fog-application/src/firmware/router.py`, `service.py` (`firmware_block`) y
+`signing.py`; firma de la nube: `FirmwareManifest.canonicalString()`.
+
+- **Cuándo:** tras una subida 2xx, cada `OTA_CHECK_EVERY_CYCLES` (12 = 1 h)
+  ciclos, y en el primer ciclo bueno tras un arranque en frío, se pide
+  `GET /api/v1/camera/config`. Solo se lee su bloque `firmware`
+  (`{version, size, sha256, signature, url}` o `null`). **`wifi` se ignora
+  siempre** (regla 1 de abajo), aunque el Fog lo mande.
+- **Qué se instala:** solo si `version > FW_VERSION` y `version != ota_rej`.
+- **Orden de las comprobaciones** (de barata a cara): versión → `ota_rej` →
+  rollback ya ocurrido con esa versión → batería (≥ `OTA_MIN_BATTERY_MV`,
+  salvo lectura no válida en el banco) → **firma** → descarga. Una firma
+  mala no cuesta ninguna descarga.
+- **Firma:** ECDSA P-256 + SHA-256, DER en Base64, sobre
+  `parkvision-fw/1|esp32cam-aithinker|<version>|<size>|<sha256 hex minúsculas>`,
+  verificada con mbedTLS (`mbedtls_pk_verify`) y la clave pública compilada
+  (`OTA_SIGNING_PUBLIC_KEY_PEM`, `config.h` §10). **Vacía = OTA
+  desactivado.** Se firma la cadena y no el binario: un binario antiguo y
+  legítimo no se puede presentar como una versión mayor.
+- **Descarga:** `GET <url>` con `X-API-Key`/`X-API-Token`, streaming a la
+  ranura libre (`OTA_WITH_SEQUENTIAL_WRITES`); exige `Content-Length == size`
+  y que el SHA-256 de lo recibido sea el firmado (la cabecera `x-SHA256` no
+  se usa: en la LAN se puede falsificar). Después `esp_ota_end` →
+  `esp_ota_set_boot_partition` → `esp_restart()`.
+- **Confirmación:** la imagen nueva arranca en `PENDING_VERIFY` y solo se
+  confirma tras una subida 2xx (`ota_confirm_if_pending()`). Si no, el
+  bootloader vuelve a la anterior en el siguiente arranque.
+- **`ota_rej`:** la imagen anterior, al ver la ranura descartada
+  (`esp_ota_get_last_invalid_partition`), calcula el SHA-256 de sus primeros
+  `size` bytes; si es el del `.bin` ofrecido, apunta esa versión en
+  `ota_rej` y no la vuelve a descargar (sin esto: descarga y rollback cada
+  hora). Es la única escritura del cliente en la NVS (regla 6).
+- **Autotest:** en cada `ESP_RST_POWERON` se verifica el vector de la nube
+  (`cloud-service/src/test/resources/firmware/signature-test-vector.json`):
+  v4 válida y la misma firma como v5 rechazada. Log:
+  `OTA: autotest de firma OK`.
+- **Memoria RTC entre builds:** cada compilación coloca las `RTC_DATA_ATTR`
+  en otras direcciones, y tras un OTA o un rollback el arranque llega como
+  despertar de deep sleep. `s_rtc_owner` guarda 4 bytes del SHA-256 del ELF;
+  si no coincide, la memoria RTC se trata como tras un arranque en frío
+  (`rtc_reason`). Al Fog viaja siempre el `reset_reason` real.
+- **Banco:** `tools/ota_test` empuja un `.bin` a mano (sin firma) para
+  probar el rollback sin el Fog.
+
+## Fotos atrasadas (buffer en la flash interna)
+
+Si la foto del ciclo no se puede subir (sin WiFi, error de red o 5xx), se
+guarda en la partición `spiffs` de Minimal SPIFFS (`0x3D0000`, 128 KB) con
+LittleFS, y se sube en el siguiente ciclo con conexión. Contrato con el Fog
+y la nube, y sus cambios: `docs/handoff-buffer-fotos-offline.md`.
+
+- **Capacidad: 1–3 fotos, 5–15 min de corte.** LittleFS asigna bloques de
+  4 KB: una foto de 30 KB ocupa 8, una de 40 KB 10 y una de 70 KB 18, y
+  quedan ~27 libres. Si se llena, se descarta la más antigua.
+- **Orden de subida:** primero la foto actual (sin `captured_at`); si da 2xx,
+  hasta `BACKLOG_MAX_SEND_PER_CYCLE` (3) atrasadas, de la más antigua a la
+  más nueva. 2xx o 4xx → se borra (un 4xx no va a cambiar); error de red o
+  5xx → se conserva y se para.
+- **Hora:** no hay RTC con pila. `clock_module` fija el reloj con la
+  cabecera `Date` de cada 2xx del Fog; sigue contando en deep sleep con el
+  RC de 150 kHz (deriva ≤ ~5 %). En la siguiente sincronización mide la
+  deriva real y corrige (renombrando) las fotos fechadas entre medias. Sin
+  sincronización desde el último arranque en frío **no se guarda nada**:
+  una foto sin hora no se puede fechar.
+- **Formato:** `/q1/<epoch de 10 cifras>.bin` = cabecera de 32 B
+  (`BacklogHeader`) + JPEG. La hora va en el nombre para corregirla con un
+  rename. Se escribe en `/q1/tmp` y se renombra al terminar; un formato
+  nuevo = directorio nuevo (`/q2`), nunca cambiar `BacklogHeader`.
+- **Coste:** un contador en `RTC_DATA_ATTR` evita montar LittleFS en los
+  ciclos sin pendientes. El primer montaje formatea la partición (~1,5 s,
+  una vez). Antes de escribir se apagan cámara y WiFi (pico de corriente).
+- **Desgaste:** solo se escribe cuando falla una subida; en el peor caso
+  (corte permanente), ~3,8 años hasta los 100 000 ciclos por sector.
+- La partición es distinta de la NVS y de `app0`/`app1`: ni el OTA ni el
+  rollback la tocan. `{"cmd":"erase"}` también borra las fotos pendientes.
+- **Dependencia de la nube:** sin que la nube compare `occurredAt` (HU-C1
+  del handoff), una foto atrasada sobrescribe el estado actual de la plaza.
+  No poner este firmware en campo antes de que eso esté desplegado.
+
 ## Convenciones
 
 - **Comentarios en español sin tildes** en el código (`.ino`, `.h`, `.cpp`):
@@ -356,7 +459,8 @@ que servir entre ciclos.
 - Los comentarios explican **por qué**, no qué. Mucho de este código tiene
   decisiones contraintuitivas por las restricciones del hardware.
 - Logs con el macro `LOG()` de `config.h`, prefijados por subsistema:
-  `CAM:`, `WIFI:`, `UPLOAD:`, `OTA:`, `NVS:`, `PROV:`, `POWER:`, `BAT:`, `SLEEP:`.
+  `CAM:`, `WIFI:`, `UPLOAD:`, `OTA:`, `NVS:`, `PROV:`, `POWER:`, `BAT:`,
+  `CLOCK:`, `BACKLOG:`, `SLEEP:`.
   Las respuestas del protocolo de aprovisionamiento (`PROV: READY/OK/ERROR`)
   no usan `LOG()` sino `Serial` directo.
 

@@ -9,6 +9,7 @@
 #include "provision_module.h"
 #include "../../config.h"
 #include "../settings/settings_module.h"
+#include "../backlog/backlog_module.h"
 
 #include "cJSON.h"
 
@@ -136,7 +137,12 @@ static void handle_line(size_t len) {
         cJSON_GetArraySize(root) == 1) {
       cJSON_Delete(root);
       if (settings_erase_all()) {
-        PROV_REPLY("OK NVS borrada, reiniciando (pedira aprovisionar)");
+        /* Las fotos pendientes son de la placa de antes del borrado (otra
+         * credencial, quiza otra camara): no deben subirse con la nueva. Que
+         * falle no impide el borrado: la NVS es lo que importa. */
+        const bool photos = backlog_erase_all();
+        PROV_REPLY("OK NVS borrada%s, reiniciando (pedira aprovisionar)",
+                   photos ? " y fotos pendientes descartadas" : " (fotos pendientes NO)");
         restart_now();
       }
       PROV_REPLY("ERROR no se pudo borrar la NVS");

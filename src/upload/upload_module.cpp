@@ -83,23 +83,32 @@ static bool add_uint(size_t &len, const char *name, unsigned long value) {
 
 static size_t build_telemetry(const UploadTelemetry &t) {
   size_t len = 0;
-  const bool ok =
+  const bool backlog = t.captured_at && t.captured_at[0];
+  /* Del momento de la captura: valen igual para la foto actual y para una
+   * atrasada (esta los lleva guardados junto al JPEG). */
+  bool ok =
       add_int (len, "fw_version",       t.fw_version)       &&
-      add_int (len, "rssi",             t.rssi)             &&
-      add_uint(len, "wifi_connect_ms",  t.wifi_connect_ms)  &&
       add_int (len, "reset_reason",     t.reset_reason)     &&
-      add_uint(len, "awake_ms",         t.awake_ms)         &&
-      add_uint(len, "free_heap",        t.free_heap)        &&
-      add_uint(len, "wake_count",       t.wake_count)       &&
-      add_uint(len, "wifi_fail_streak", t.wifi_fail_streak) &&
       add_field(len, "framesize",       t.framesize ? t.framesize : "") &&
       add_int (len, "jpeg_quality",     t.jpeg_quality)     &&
       add_field(len, "battery_valid",   t.battery_valid ? "true" : "false") &&
       /* Sin medida fiable no se manda una tension: ensuciaria el historico
        * del Fog con valores que parecen buenos. */
       (!t.battery_valid || add_int(len, "battery_mv", t.battery_mv));
+  if (ok && backlog) {
+    ok = add_field(len, "captured_at", t.captured_at);
+  } else if (ok) {
+    /* Del ciclo de subida: solo tienen sentido en la foto actual. */
+    ok = add_int (len, "rssi",             t.rssi)             &&
+         add_uint(len, "wifi_connect_ms",  t.wifi_connect_ms)  &&
+         add_uint(len, "awake_ms",         t.awake_ms)         &&
+         add_uint(len, "free_heap",        t.free_heap)        &&
+         add_uint(len, "wake_count",       t.wake_count)       &&
+         add_uint(len, "wifi_fail_streak", t.wifi_fail_streak);
+  }
   if (!ok) {
-    /* La foto es lo critico: si la telemetria no cabe, se manda sin ella. */
+    /* La foto es lo critico: si la telemetria no cabe, se manda sin ella.
+     * Una atrasada sin captured_at pasaria por foto actual: esa no se sube. */
     LOG("UPLOAD: la telemetria no cabe en el buffer, se envia solo la foto");
     return 0;
   }
@@ -108,7 +117,10 @@ static size_t build_telemetry(const UploadTelemetry &t) {
 
 int upload_frame(const char *fog_host, uint16_t fog_port,
                  const char *api_key, const char *api_token,
-                 camera_fb_t *fb, const UploadTelemetry *telemetry) {
+                 const uint8_t *jpeg, size_t jpeg_len,
+                 const UploadTelemetry *telemetry,
+                 char *date_out, size_t date_out_len) {
+  if (date_out && date_out_len) date_out[0] = '\0';
   if (!fog_host || fog_host[0] == '\0' || fog_port == 0) {
     LOG("UPLOAD: sin host/puerto del Fog, no se sube");
     return -1;
@@ -117,14 +129,23 @@ int upload_frame(const char *fog_host, uint16_t fog_port,
     LOG("UPLOAD: sin credencial, no se sube (el Fog responderia 401)");
     return -1;
   }
-  if (!fb || !fb->buf || fb->len == 0) {
+  if (!jpeg || jpeg_len == 0) {
     LOG("UPLOAD: frame invalido, no se sube");
     return -1;
   }
 
+  const bool backlog = telemetry && telemetry->captured_at && telemetry->captured_at[0];
   size_t head_len = 0;
   if (telemetry) {
     head_len = build_telemetry(*telemetry);
+    if (backlog && head_len == 0) return -1;
+  }
+  if (backlog) {
+    LOG("UPLOAD: foto atrasada captured_at=%s fw=%d reset=%d %s q=%d bat=%ld mV%s",
+        telemetry->captured_at, telemetry->fw_version, telemetry->reset_reason,
+        telemetry->framesize ? telemetry->framesize : "?", telemetry->jpeg_quality,
+        (long)telemetry->battery_mv, telemetry->battery_valid ? "" : " (no valida)");
+  } else if (telemetry) {
     LOG("UPLOAD: telemetria fw=%d rssi=%d wifi_ms=%lu reset=%d awake_ms=%lu "
         "heap=%lu wake=%lu wifi_fails=%lu %s q=%d bat=%ld mV%s",
         telemetry->fw_version, telemetry->rssi,
@@ -153,14 +174,14 @@ int upload_frame(const char *fog_host, uint16_t fog_port,
   char tail[64];
   const int tail_len = snprintf(tail, sizeof(tail), "\r\n--%s--\r\n", kBoundary);
 
-  const size_t total_len = head_len + fb->len + (size_t)tail_len;
+  const size_t total_len = head_len + jpeg_len + (size_t)tail_len;
 
   uint8_t *body = alloc_body(total_len);
   if (!body) return -1;
 
   memcpy(body, s_head, head_len);
-  memcpy(body + head_len, fb->buf, fb->len);
-  memcpy(body + head_len + fb->len, tail, (size_t)tail_len);
+  memcpy(body + head_len, jpeg, jpeg_len);
+  memcpy(body + head_len + jpeg_len, tail, (size_t)tail_len);
 
   /* Sin DEVICE_ID en la URL: el Fog identifica la camara por la credencial
    * (X-API-Key + X-API-Token), asi una camara no puede subir frames a otra. */
@@ -173,11 +194,15 @@ int upload_frame(const char *fog_host, uint16_t fog_port,
   http.addHeader("X-API-Key", api_key);
   http.addHeader("X-API-Token", api_token);
   http.addHeader("Content-Type", String("multipart/form-data; boundary=") + kBoundary);
+  /* HTTPClient descarta las cabeceras de la respuesta salvo las pedidas. */
+  static const char *kCollect[] = { "Date" };
+  http.collectHeaders(kCollect, 1);
 
   LOG("UPLOAD: POST %s (%u bytes)", url.c_str(), (unsigned)total_len);
   const int code = http.POST(body, total_len);
   if (code > 0) {
     LOG("UPLOAD: respuesta HTTP %d", code);
+    if (date_out && date_out_len) strlcpy(date_out, http.header("Date").c_str(), date_out_len);
   } else {
     LOG("UPLOAD: fallo la conexion (%s)", http.errorToString(code).c_str());
   }

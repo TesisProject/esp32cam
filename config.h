@@ -31,7 +31,7 @@
  * una mayor que la mia?") sin parsear cadenas tipo "1.4.0". Viaja al Fog
  * como fw_version en cada POST y sale en el log de arranque.
  * SUBIRLO antes de compilar cualquier binario que vaya a otra placa. */
-#define FW_VERSION             2
+#define FW_VERSION             3
 
 /* ===========================================================================
  * 2. WIFI  (solo modo estacion: un AP propio impediria dormir la radio)
@@ -89,6 +89,8 @@
 #define FOG_SERVER_PORT_DEFAULT 8000
 #define FOG_HOST_MAX_LEN        63     // nombre o IP; mas largo = error al aprovisionar
 #define FOG_FRAMES_PATH         "/api/v1/camera/frames"
+#define FOG_CONFIG_PATH         "/api/v1/camera/config"   // de aqui sale la oferta de firmware (E5)
+#define FOG_PATH_MAX_LEN        63     // url relativa del .bin que da la config
 // Endpoint final construido en tiempo de ejecucion:
 //   http://<host de la NVS o defecto>:<puerto>/api/v1/camera/frames
 //
@@ -243,10 +245,13 @@
 #define BATTERY_RESUME_MV            3400
 
 /* Curva de descarga Li-ion en reposo (mV -> %), interpolada linealmente.
- * Solo para el log serie: al Fog viaja la tension, y el porcentaje se deriva
- * alli al leer, para que recalibrar la curva no invalide el historico.  */
-#define BATTERY_CURVE_MV   { 3000, 3300, 3500, 3650, 3750, 3850, 4000, 4200 }
-#define BATTERY_CURVE_PCT  {    0,    3,   12,   30,   45,   60,   80,  100 }
+ * Solo para el log serie: al Fog viaja la tension, y la nube deriva el
+ * porcentaje al leer, para que recalibrar la curva no invalide el historico.
+ * 0 % = BATTERY_CUTOFF_MV: por debajo la camara ya no transmite. La MISMA
+ * tabla va en cloud-service (docs/handoff-bateria-cloud.md) y en
+ * tools/battery_monitor: cambiarla en los tres sitios a la vez.          */
+#define BATTERY_CURVE_MV   { 3300, 3500, 3650, 3750, 3850, 4000, 4200 }
+#define BATTERY_CURVE_PCT  {    0,    9,   28,   43,   59,   79,  100 }
 
 /* ===========================================================================
  * 7. ALMACEN EN NVS  -  la configuracion propia de cada placa
@@ -305,7 +310,93 @@
                                                // con caracteres escapados)
 
 /* ===========================================================================
- * 9. DEPURACION
+ * 9. FOTOS ATRASADAS Y RELOJ  -  buffer en la flash interna
+ *
+ *  Si la foto del ciclo no se puede subir (sin WiFi, Fog caido, 5xx), se
+ *  guarda en la particion "spiffs" de Minimal SPIFFS (0x3D0000, 128 KB) con
+ *  LittleFS, que viene en el core. Cuando vuelve la conexion se sube primero
+ *  la foto actual y despues hasta BACKLOG_MAX_SEND_PER_CYCLE atrasadas, cada
+ *  una con su captured_at. Contrato y motivos: docs/handoff-buffer-fotos-offline.md.
+ *
+ *  No hay microSD: su D3 esta cableado a GPIO13 y el pull-up interno de la
+ *  tarjeta (10-90 kOhm a 3,3 V, siempre alimentada) falsea la bateria.
+ *
+ *  Capacidad: LittleFS asigna bloques enteros de 4 KB. Una foto de 30 KB
+ *  ocupa 8, una de 40 KB 10 y una de 70 KB 18, y quedan ~27 bloques libres:
+ *  caben 1-3 fotos = 5-15 min de corte. Lleno, se descarta la mas antigua.
+ *
+ *  El reloj: el ESP32 no tiene RTC con pila. Se pone en hora con la cabecera
+ *  Date de cada 2xx del Fog y sigue contando en deep sleep (oscilador RC
+ *  interno, deriva de hasta ~5 %). Sin una sincronizacion desde el ultimo
+ *  arranque en frio no hay hora, y una foto sin hora no se guarda.
+ * ==========================================================================*/
+#define BACKLOG_ENABLED             1
+#define BACKLOG_PARTITION_LABEL     "spiffs"   // etiqueta en min_spiffs.csv
+#define BACKLOG_DIR                 "/q1"      // la version del formato va en el nombre:
+                                               // un formato nuevo = directorio nuevo
+#define BACKLOG_MAX_FILES           8          // tope de seguridad; manda el espacio
+#define BACKLOG_MAX_SEND_PER_CYCLE  3          // acota el ciclo: 3 POST mas (~3 s de radio)
+#define BACKLOG_MAX_AGE_S           86400UL    // 24 h, igual que BACKLOG_MAX_AGE_HOURS del Fog:
+                                               // mas vieja, el Fog la rechazaria con 422
+#define BACKLOG_FREE_MARGIN_BYTES   8192       // 2 bloques libres: LittleFS escribe copias
+                                               // nuevas antes de soltar las viejas
+
+/* Ninguna hora anterior a esta es real (2026-01-01T00:00:00Z): un reloj que
+ * marca menos no se ha sincronizado nunca, y una Date que marca menos es un
+ * Fog con la hora mal (la Pi no tiene RTC: sin NTP arranca con hora vieja). */
+#define CLOCK_MIN_VALID_EPOCH       1767225600UL
+/* La deriva medida entre dos sincronizaciones solo se aplica si es creible:
+ * el RC de 150 kHz se desvia como mucho ~5 %; mas de un 10 % es otra cosa
+ * (un Fog que cambio de hora) y es mejor no tocar las horas guardadas. */
+#define CLOCK_MAX_DRIFT_PCT         10
+#define CLOCK_MIN_SPAN_S            60         // intervalo minimo para medir la deriva
+
+/* ===========================================================================
+ * 10. OTA (E5)  -  actualizacion de firmware desde el Fog
+ *
+ *  Cada OTA_CHECK_EVERY_CYCLES ciclos con subida correcta se pide
+ *  GET /api/v1/camera/config. Si su bloque "firmware" ofrece una version
+ *  mayor que FW_VERSION y no rechazada antes (ota_rej), se verifica la firma
+ *  ANTES de descargar nada, se descarga por streaming a la otra ranura
+ *  comprobando tamano y SHA-256, y se reinicia en ella. La imagen nueva solo
+ *  se confirma tras una subida 2xx (ota_confirm_if_pending): si no, el
+ *  bootloader vuelve a esta al siguiente arranque y esta apunta la version
+ *  en ota_rej para no volver a instalarla.
+ *
+ *  Lo firmado (ECDSA P-256 + SHA-256, firma DER en Base64) es la cadena
+ *    parkvision-fw/1|<OTA_HARDWARE_ID>|<version>|<size>|<sha256 hex minusculas>
+ *  y no el binario: ata la version a la imagen, asi un binario antiguo y
+ *  legitimo no se puede presentar como una version mayor. La arman igual la
+ *  nube (FirmwareManifest.canonicalString) y el Fog (firmware/signing.py).
+ * ==========================================================================*/
+#define OTA_ENABLED                1
+#define OTA_HARDWARE_ID            "esp32cam-aithinker"
+#define OTA_CHECK_EVERY_CYCLES     12          // 12 x 5 min = una vez por hora
+/* Descargar y escribir 1,2 MB son ~10-20 s con la radio encendida. Con la
+ * celda baja un brownout a media escritura no rompe nada (la ranura nueva no
+ * se activa hasta el final), pero gasta la descarga entera. Sin medida
+ * fiable (USB en el banco) no se bloquea. */
+#define OTA_MIN_BATTERY_MV         3600
+#define OTA_HTTP_TIMEOUT_MS        10000UL     // sin recibir nada en este tiempo: se aborta
+#define OTA_DOWNLOAD_TIMEOUT_MS    120000UL    // tope de la descarga completa
+#define OTA_BUFFER_SIZE            4096        // un sector: lo que se lee y escribe de cada vez
+#define OTA_SIGNATURE_B64_MAX_LEN  128         // DER de P-256 <= 72 B = 96 en Base64
+
+/* Clave PUBLICA de firma (PEM, SubjectPublicKeyInfo P-256). Es publica, no un
+ * secreto: va compilada a proposito, porque es el ancla de confianza y no
+ * puede llegar por la misma red que el firmware. Es la misma de
+ * FIRMWARE_SIGNING_PUBLIC_KEY_PATH en el Fog. Cambiarla (rotacion) exige
+ * publicar antes un firmware firmado con la vieja que traiga la nueva.
+ * Vacia = OTA desactivado (se loguea al recibir una oferta).
+ * signingKeyId (16 hex del SHA-256 del DER): aed67c7249a5c365. */
+#define OTA_SIGNING_PUBLIC_KEY_PEM \
+  "-----BEGIN PUBLIC KEY-----\n" \
+  "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEKdQ6eqRdUkWhwnPIH/bzQKsRtHGe\n" \
+  "BFBFlCuq7lwxmrdwBOTZaq8DBqLPklAMemqCaqZvd/1rZ8TRaSSCvvWb/w==\n" \
+  "-----END PUBLIC KEY-----\n"
+
+/* ===========================================================================
+ * 11. DEPURACION
  * ==========================================================================*/
 #define SERIAL_BAUD            115200
 #define DEBUG_ENABLED          1

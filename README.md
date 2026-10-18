@@ -30,7 +30,8 @@ la API y el host del Fog de cada una se graban por USB en su NVS (§6.6).
 | Parámetro | Valor |
 |---|---|
 | Pack de batería | **una celda 18650 Li-ion (1S, 3,0–4,2 V)** → TP4056 → MT3608 a 5 V; tensión medida por GPIO13 (§4.3) |
-| microSD | **No se usa** |
+| microSD | **No se usa**: su D3 está unido a GPIO13 y falsearía la batería (§3) |
+| Fotos no subidas | Se guardan en la **flash interna** (LittleFS, 128 KB): 1–3 fotos, 5–15 min de corte (§2) |
 | Red | **Solo estación** — necesita el router para llegar a la Pi; el modo AP impide dormir |
 | Intervalo de captura | **5 minutos** (`CAPTURE_INTERVAL_MS`), deep sleep entre medio |
 | Subida | `POST` multipart a `http://<fogHost>:<fogPort>/api/v1/camera/frames` (sin id: el Fog identifica la cámara por `X-API-Key`/`X-API-Token`); responde `202 Accepted` |
@@ -54,8 +55,11 @@ esp32cam/
 │   ├── camera/camera_module.*  OV2640: init, captura, PWDN + hold para deep sleep
 │   ├── wifi/wifi_module.*      Conexión en modo estación (timeout, MAC, IP fija)
 │   ├── upload/upload_module.*  POST multipart/form-data (foto + telemetría) a la Raspberry Pi
-│   ├── ota/ota_module.*        FW_VERSION y partición en el log; rollback de imágenes OTA
+│   ├── ota/ota_module.*        FW_VERSION, rollback y cliente OTA (firma, descarga, instalación)
+│   ├── fogconfig/fogconfig_module.*  Config de la cámara del Fog (versión de firmware asignada)
 │   ├── battery/battery_module.*  Tensión del pack por GPIO13 y % (antes del WiFi)
+│   ├── clock/clock_module.*    Hora real a partir de la cabecera Date del Fog
+│   ├── backlog/backlog_module.*  Fotos no subidas en la flash interna (LittleFS)
 │   ├── settings/settings_module.*   Única puerta a la NVS (Preferences)
 │   └── provision/provision_module.* Aprovisionamiento por serie (línea JSON)
 └── README.md
@@ -90,11 +94,34 @@ principio a fin y termina en `esp_deep_sleep_start()`, que no retorna.
 4. Capturar 1 frame JPEG y subirlo por `POST` a la Pi, con la telemetría
    del ciclo en el mismo multipart (ver abajo). Si la respuesta es 2xx y la
    imagen en ejecución viene de un OTA sin confirmar, confirmarla.
-5. Apagar la cámara (PWDN + `rtc_gpio_hold_en`), apagar WiFi, dormir
+5. Si la subida fue bien: poner el reloj en hora con la cabecera `Date` de
+   la respuesta y subir hasta 3 fotos atrasadas. Si no (sin WiFi, error de
+   red o 5xx): guardar la foto en la flash interna.
+6. Apagar la cámara (PWDN + `rtc_gpio_hold_en`), apagar WiFi, dormir
    `CAPTURE_INTERVAL_MS` y repetir.
 
 Si falla la cámara o el WiFi, el ciclo se aborta y el dispositivo duerme
-igual — no se queda colgado reintentando, que gasta batería.
+igual — no se queda colgado reintentando, que gasta batería. Sin WiFi, la
+foto se captura de todos modos después del intento de conexión y se guarda.
+
+### Fotos atrasadas
+
+Una foto que no se pudo subir se guarda en la partición `spiffs` de la
+flash interna (128 KB, LittleFS) y se sube en el siguiente ciclo con
+conexión, **después** de la foto actual, con su hora de captura en
+`captured_at`.
+
+- **Capacidad:** 1–3 fotos (30–70 KB cada una), es decir, 5–15 min de corte.
+  Si se llena, se descarta la más antigua. Cubre reinicios del router o del
+  Fog, no cortes largos.
+- **Hora:** el ESP32 no tiene reloj con pila. La toma de la cabecera `Date`
+  de cada respuesta del Fog y la mantiene durante el deep sleep. Tras un
+  arranque en frío, hasta la primera subida correcta no hay hora y las fotos
+  que fallen se pierden.
+- **Coste:** nada en los ciclos normales; ~0,5 s con el WiFi apagado al
+  guardar una foto y un `POST` más por cada foto reenviada.
+
+Detalle y contrato con el Fog y la nube: `docs/handoff-buffer-fotos-offline.md`.
 
 ### Telemetría que acompaña a cada foto
 
@@ -115,10 +142,12 @@ que descarta sin fallar cualquier valor que no sepa leer.
 | `framesize` / `jpeg_quality` | resolución y calidad aplicadas de verdad (`QVGA`/15 si falta PSRAM) |
 | `battery_valid` | `true` si la lectura de GPIO13 es la de un pack Li-ion conectado (2,5–4,5 V) |
 | `battery_mv` | tensión del pack en reposo, mV; solo se envía si `battery_valid` es `true` |
+| `captured_at` | solo en fotos atrasadas: hora de captura, ISO 8601 UTC. Esas fotos no llevan `rssi`, `wifi_connect_ms`, `awake_ms`, `free_heap`, `wake_count` ni `wifi_fail_streak` (serían del ciclo de la subida) |
 
-El **porcentaje no viaja**: el Fog guarda medidas y deriva el % al leer, para
-que cambiar la curva de descarga no invalide el histórico (ignora un campo
-`battery_percent`). El firmware lo calcula solo para el log serie.
+El **porcentaje no viaja**: Fog y nube guardan medidas y la nube deriva el %
+al leer, para que cambiar la curva de descarga no invalide el histórico (el
+Fog ignora un campo `battery_percent`). El firmware lo calcula solo para el
+log serie, con la misma tabla que la nube (`docs/handoff-bateria-cloud.md`).
 `battery_load_mv` (tensión durante la transmisión) tampoco: GPIO13 es ADC2 y
 no se puede leer con el WiFi encendido.
 
@@ -135,9 +164,16 @@ GPIO33 lleva el LED rojo integrado (LED de estado, `STATUS_LED_PIN`).
 GPIO13 mide la batería (divisor, §4.3).
 
 > **Si en el futuro añades algo por GPIO**: GPIO12 es el strapping MTDI y un
-> pull-up ahí impide arrancar el chip. GPIO14/15 están libres mientras no se
-> use la microSD; si vuelve la microSD, solo en modo 1 bit
-> (`SD_MMC.begin("/sdcard", true)`), porque en 4 bits usa GPIO13.
+> pull-up ahí impide arrancar el chip. GPIO14/15 están libres.
+
+> **microSD: no, ni en modo 1 bit.** El modo 1 bit solo usa GPIO14/15/2,
+> pero la pista D3 del slot sigue soldada a GPIO13, y toda microSD tiene en
+> DAT3 un pull-up interno (10–90 kΩ a 3,3 V) activo mientras está
+> alimentada, que en esta placa es siempre. Con la tarjeta puesta, GPIO13
+> pasa de `Vbat/2` (1,50–2,10 V) a ~2,40–2,70 V: la mitad de rango y fuera de
+> la zona lineal del ADC. Leer la batería antes de montar la SD no lo evita.
+> Para usarla habría que cortar la pista DAT3 o mover el divisor a GPIO33
+> (ADC1, quitando el LED rojo).
 
 ---
 
@@ -204,7 +240,7 @@ una vez cortada no vuelve a transmitir hasta superar **3,4 V**. Umbrales en
 En el monitor serie, cada ciclo:
 
 ```
-[     412] BAT: ADC IO13: 1855 mV | Bateria: 3.71 V | 39 % (cal. defecto)
+[     412] BAT: ADC IO13: 1855 mV | Bateria: 3.71 V | 37 % (cal. defecto)
 ```
 
 #### Calibrar (una vez por placa)
@@ -387,8 +423,10 @@ completo con `CAPTURE_INTERVAL_MS` bajado a 30 s para pruebas:
 - Sin PSRAM, `CAM:` avisa de que se degrada a QVGA y aparece
   `UPLOAD: body en RAM interna (... bytes, sin PSRAM)`: la foto se sube
   igual, pero a 320×240 la detección en el Fog pierde precisión.
-- Tras un OTA (todavía no implementado) el estado sería `PENDING_VERIFY` y,
-  después de la primera subida buena, `OTA: imagen de app1 confirmada`.
+- Tras un OTA el estado es `PENDING_VERIFY` y, después de la primera subida
+  buena, `OTA: imagen de app1 confirmada`. El cliente OTA pregunta al Fog
+  una vez por hora si hay versión nueva; solo instala versiones mayores con
+  la firma de la nube válida (ver `CLAUDE.md`, "Cliente OTA (E5)").
 - Tras encender o pulsar RST (`Reset reason: 1`) aparece además
   `PROV: READY modo=reaprovisionar ventana=3000 ms`: son 3 s en los que se
   puede reescribir la configuración (§6.6). Al despertar del deep sleep no

@@ -85,4 +85,7 @@ void wifi_off() {
   if (!s_started) return;
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
+  /* Puede llamarse dos veces en un ciclo (antes de guardar una foto en flash
+   * y otra en go_to_sleep): la segunda no debe tocar un driver ya parado. */
+  s_started = false;
 }
