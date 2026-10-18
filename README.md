@@ -20,8 +20,8 @@ ESP32-CAM  ─ HTTP POST (JPEG) ─→  Raspberry Pi (fog node)  ─→  nube
 ```
 
 Hay **3 unidades físicas** (`CAM-001`, `CAM-002`, `CAM-003`), mismo código
-fuente. Hasta que llegue el alta por MAC, cada una se compila todavía con su
-propio `secrets.h` (credencial de la API); la WiFi ya no va ahí.
+fuente y **un único `.bin`**, sin secretos dentro: la WiFi, la credencial de
+la API y el host del Fog de cada una se graban por USB en su NVS (§6.6).
 
 ---
 
@@ -36,8 +36,8 @@ propio `secrets.h` (credencial de la API); la WiFi ya no va ahí.
 | Subida | `POST` multipart a `http://<fogHost>:<fogPort>/api/v1/camera/frames` (sin id: el Fog identifica la cámara por `X-API-Key`/`X-API-Token`); responde `202 Accepted` |
 
 Las constantes y los valores por defecto viven en `config.h`. Lo propio de
-cada placa (WiFi, host y puerto del Fog) vive en su **NVS** y se graba por
-USB (§6.6); la credencial de la API, de momento, en `secrets.h`.
+cada placa (WiFi, credencial de la API, host y puerto del Fog) vive en su
+**NVS** y se graba por USB (§6.6).
 
 ---
 
@@ -47,9 +47,7 @@ USB (§6.6); la credencial de la API, de momento, en `secrets.h`.
 esp32cam/
 ├── esp32cam.ino                Orquesta el ciclo: setup() = un ciclo completo -> deep sleep.
 ├── config.h                    Constantes y valores por defecto (pines, umbrales, endpoint…)
-├── secrets.h                   DEVICE_ID/API_KEY/API_TOKEN — NO se versiona
-├── secrets.h.example           Plantilla de secrets.h
-├── provision.example.json      Plantilla de WiFi + host del Fog para grabar por USB
+├── provision.example.json      Plantilla de WiFi + credencial + host del Fog para grabar por USB
 ├── provision.local.json        La tuya — NO se versiona
 ├── scripts/provision.ps1       La envía a la placa por el puerto serie
 ├── src/
@@ -69,8 +67,8 @@ un módulo nuevo va en `src/<nombre>/`. Desde el `.ino` se incluyen con la
 ruta (`#include "src/wifi/wifi_module.h"`) y los módulos llegan a `config.h`
 con `#include "../../config.h"`.
 
-`config.h`, `secrets.h` y los `provision.*.json` se quedan en la raíz a
-propósito: son lo único que se toca para configurar o flashear cada unidad.
+`config.h` y los `provision.*.json` se quedan en la raíz a propósito: son lo
+único que se toca para configurar cada unidad.
 
 > El Arduino IDE 2.x solo muestra como pestañas los ficheros de la raíz: los
 > de `src/` compilan igual, pero se editan desde VS Code u otro editor.
@@ -284,24 +282,13 @@ dejar la cámara desatendida con batería.
 
 #### Credenciales
 
-`config.h` **no contiene credenciales**. La WiFi y el host del Fog se graban
-después de flashear, por USB (§6.6). La credencial de la API (provisional,
-hasta el alta por MAC) está en `secrets.h`, que git ignora.
+El firmware **no contiene credenciales**: se compila y se flashea el mismo
+`.bin` en las tres cámaras. La WiFi, la credencial de la API (id de cámara,
+`apiKey`, `apiToken`) y el host del Fog se graban después de flashear, por
+USB (§6.6).
 
-Si acabas de clonar el proyecto, ese fichero no existe y la compilación falla
-a propósito con un mensaje claro. Créalo desde la plantilla:
-
-```powershell
-cd esp32cam
-copy secrets.h.example secrets.h
-```
-
-Y rellena los tres valores: `DEVICE_ID`, `API_KEY` y `API_TOKEN`. Son
-distintos **para cada una de las 3 unidades** (`CAM-001`/`CAM-002`/`CAM-003`):
-confirmar cuál se está flasheando antes de subir el sketch.
-
-> Si tu `secrets.h` es antiguo y aún tiene `WIFI_SSID`/`WIFI_PASSWORD`,
-> bórralos: `config.h` los anula, ya no se usan ni entran en el binario.
+> Ya no hay `secrets.h`. Si te queda uno de una versión anterior, bórralo:
+> nada lo incluye (git lo sigue ignorando por si acaso).
 
 #### Soporte de placas
 
@@ -378,15 +365,15 @@ Herramientas → Monitor Serie, a **115200 baudios**. Ejemplo de un ciclo
 completo con `CAPTURE_INTERVAL_MS` bajado a 30 s para pruebas:
 
 ```
-[     210] === ESP32-CAM ParkVision (CAM-001) ===
-[     211] OTA: FW_VERSION=1  particion activa=app0  estado=UNDEFINED (flasheo USB)
+[     210] === ESP32-CAM ParkVision ===
+[     211] OTA: FW_VERSION=2  particion activa=app0  estado=UNDEFINED (flasheo USB)
 [     212] Reset reason: 8  wake_count=12  wifi_fail_streak=0
-[     230] NVS: wifi="ParkVisionFog1"  fog=parkvision.local:8000 (NVS)
+[     230] NVS: camera=CAM-001  wifi="ParkVisionFog1"  fog=parkvision.local:8000 (NVS)
 [     620] CAM: lista (800x600, PSRAM=si)
 [     720] WIFI: MAC=24:6F:28:XX:XX:XX
 [     720] WIFI: conectando a "ParkVisionFog1"...
 [    4380] WIFI: conectado en 3660 ms. IP=192.168.1.42  RSSI=-58 dBm
-[    4645] UPLOAD: telemetria fw=1 rssi=-58 wifi_ms=3660 reset=8 awake_ms=4640 heap=172000 wake=12 wifi_fails=0 SVGA q=12
+[    4645] UPLOAD: telemetria fw=2 rssi=-58 wifi_ms=3660 reset=8 awake_ms=4640 heap=172000 wake=12 wifi_fails=0 SVGA q=12
 [    4650] UPLOAD: POST http://parkvision.local:8000/api/v1/camera/frames (42050 bytes)
 [    5210] UPLOAD: respuesta HTTP 202
 [    5210] UPLOAD: ok (202)
@@ -407,10 +394,10 @@ completo con `CAPTURE_INTERVAL_MS` bajado a 30 s para pruebas:
   puede reescribir la configuración (§6.6). Al despertar del deep sleep no
   aparece.
 
-### 6.6 Aprovisionar: WiFi y host del Fog (una vez por placa)
+### 6.6 Aprovisionar: WiFi, credencial y host del Fog (una vez por placa)
 
-La WiFi y el host del Fog **no están en el binario**: el mismo `.bin` sirve
-para cualquier placa y cualquier red. Se graban en la NVS de la placa (una
+La WiFi, la credencial de la cámara y el host del Fog **no están en el
+binario**: el mismo `.bin` sirve para cualquier placa y cualquier red. Se graban en la NVS de la placa (una
 zona de la flash que sobrevive a reinicios, al deep sleep y a reflashear el
 sketch) con una línea JSON por el puerto serie:
 
@@ -423,10 +410,17 @@ sketch) con una línea JSON por el puerto serie:
    ```json
    {
      "wifi": { "ssid": "ParkVisionFog1", "password": "…" },
+     "camera": { "id": "CAM-001", "apiKey": "…", "apiToken": "…" },
      "fogHost": "192.168.1.20",
      "fogPort": 8000
    }
    ```
+
+   `camera` es **distinto para cada unidad** (`CAM-001`/`CAM-002`/`CAM-003`):
+   `apiKey`/`apiToken` son los que el Fog dio de alta para esa cámara (van
+   en `X-API-Key`/`X-API-Token`; el Fog identifica la cámara solo por
+   ellos). `id` solo sale en el log de arranque. Los tres van juntos; key y
+   token, 1–63 caracteres ASCII sin espacios.
 
    La red debe ser de **2,4 GHz** (el ESP32 no ve las de 5 GHz) y WPA2 con
    contraseña de 8 a 63 caracteres ASCII: las redes abiertas se rechazan.
@@ -448,23 +442,25 @@ sketch) con una línea JSON por el puerto serie:
    ```
    Reiniciando la placa en COM5 (pulso RTS)...
      | PROV: READY modo=aprovisionar ventana=60000 ms. Enviar una linea JSON
-   Enviando: wifi.ssid="ParkVisionFog1" fogHost=192.168.1.20 fogPort=8000
-     | PROV: OK guardado: wifi="ParkVisionFog1" fog=192.168.1.20:8000. Reiniciando
+   Enviando: camera.id=CAM-001 wifi.ssid="ParkVisionFog1" fogHost=192.168.1.20 fogPort=8000
+     | PROV: OK guardado: camera=CAM-001 wifi="ParkVisionFog1" fog=192.168.1.20:8000 bat=... Reiniciando
    OK: la placa guardo la configuracion y reinicia.
    ```
 
-   La contraseña no se imprime nunca, ni en el PC ni en la placa.
+   La contraseña, la `apiKey` y el `apiToken` no se imprimen nunca, ni en
+   el PC ni en la placa.
 
 **Cuándo escucha la placa:**
 
 | Situación | Qué hace |
 |---|---|
-| NVS sin WiFi (placa nueva o borrada) | espera la línea **60 s** (`PROV_WAIT_MS`); si no llega, duerme **1 h** (`PROV_RETRY_SLEEP_MS`) y repite. En campo, sin USB, no puede esperar indefinidamente: así gasta ~0,7 mAh por hora |
+| NVS sin WiFi o sin credencial (placa nueva, borrada, o aprovisionada con un firmware anterior a `FW_VERSION` 2) | espera la línea **60 s** (`PROV_WAIT_MS`); si no llega, duerme **1 h** (`PROV_RETRY_SLEEP_MS`) y repite. En campo, sin USB, no puede esperar indefinidamente: así gasta ~0,7 mAh por hora |
 | Ya aprovisionada, tras encender / RST / pulso RTS | ventana de **3 s** (`PROV_WINDOW_MS`) para reescribir o borrar |
 | Despertar del deep sleep | nada: los ciclos normales no esperan |
 
-**Reescribir o borrar.** Volver a ejecutar el script reescribe la WiFi y el
-Fog (se cambia solo lo que venga en el JSON). Para que la placa lo olvide
+**Reescribir o borrar.** Volver a ejecutar el script reescribe la WiFi, la
+credencial y el Fog (la placa cambia solo lo que venga en la línea; el
+script exige siempre `wifi` y `camera`). Para que la placa lo olvide
 todo y vuelva a pedir aprovisionamiento:
 
 ```powershell
@@ -472,9 +468,15 @@ todo y vuelva a pedir aprovisionamiento:
 ```
 
 Sin la base ESP32-CAM-MB (un FTDI sin línea RTS), el script avisa a los 4 s:
-pulsa **RST** en la placa en ese momento. También se puede pegar la línea a
-mano en el Monitor serie justo después de `PROV: READY`, como una sola línea
-terminada en salto de línea.
+pulsa **RST** en la placa en ese momento.
+
+**Desde el Monitor serie, sin script.** Se pega la línea JSON entera (una
+sola línea) y se pulsa Enter; vale cualquier fin de línea (CR, LF o CRLF).
+Con una placa sin aprovisionar hay 60 s desde `PROV: READY`, de sobra. Ya
+aprovisionada, la ventana es de 3 s tras RST: más cómodo mandar primero
+`{"cmd":"erase"}` (o usar el script), y la placa queda esperando 60 s. Con
+`arduino-cli monitor`, `dtr=off,rts=off` (§8). Por el serie la línea se valida
+igual que con el script, pero sin los avisos de «valor de la plantilla».
 
 ---
 
@@ -492,7 +494,7 @@ terminada en salto de línea.
 Después de tocar `config.h`, **vuelve a subir el sketch**: es código compilado.
 
 Lo que **no** se cambia aquí, sino reaprovisionando la placa (§6.6), sin
-recompilar: la red WiFi y el host/puerto del Fog. Por ejemplo, si la Pi no
+recompilar: la red WiFi, la credencial de la cámara y el host/puerto del Fog. Por ejemplo, si la Pi no
 resuelve por `.local`, aprovisiona `fogHost` con su IP. `FOG_SERVER_HOST_DEFAULT`
 de `config.h` solo se usa en placas sin host guardado.
 
@@ -502,19 +504,18 @@ de `config.h` solo se usa en placas sin host guardado.
 
 | Síntoma | Causa habitual |
 |---|---|
-| `#error "Falta secrets.h..."` | No has creado `secrets.h`, o le falta algún valor. Copia `secrets.h.example` y rellénalo (§6.1). |
 | `Sketch too big` al compilar | Comprobar que el *Partition Scheme* es **Minimal SPIFFS** (con *Default* solo hay 1,25 MB). No pasar a Huge APP: no tiene segunda partición y anula el OTA. |
 | `esp_camera_init fallo (0x105)` | Cable plano mal insertado o alimentación insuficiente. Prueba con `CAM_XCLK_FREQ_HZ 10000000`. |
 | `Camera probe failed` o cuelgue al arrancar | PSRAM sin habilitar en Herramientas. |
 | `WIFI: sin conexion tras ... ms` | Router fuera de rango, SSID/contraseña mal aprovisionados (reaprovisiona, §6.6), o red de 5 GHz (el ESP32 no la ve). |
 | `UPLOAD: fallo la conexion` | La Raspberry Pi está apagada/inalcanzable, o el host/puerto del Fog aprovisionados no son los suyos (mira la línea `NVS: ... fog=` del arranque). El firmware agota el timeout y duerme igual. |
-| `PROV: la NVS no tiene WiFi` y la placa duerme 1 h | Placa sin aprovisionar (nueva, o tras `-Erase`, o tras subir `SETTINGS_SCHEMA_VERSION`). Ejecuta el script (§6.6). |
+| `PROV: la NVS no tiene WiFi o credencial` y la placa duerme 1 h | Placa sin aprovisionar (nueva, tras `-Erase`, o aprovisionada antes de `FW_VERSION` 2, sin `camera`). Ejecuta el script (§6.6). |
 | El script dice `no dijo 'PROV: READY'` | Puerto equivocado, firmware sin aprovisionamiento, `IO0` puenteado a GND (modo descarga), o adaptador sin RTS (pulsa RST cuando avise). |
 | El script no puede abrir el puerto | Está abierto en el Monitor serie del IDE o de VS Code: ciérralo. |
 | `PROV: ERROR ...` | El motivo viene en la misma línea (SSID de más de 32 bytes, contraseña fuera de 8–63, `fogHost` con `http://`, campo desconocido…). El script valida lo mismo antes de enviar. |
-| `UPLOAD: fallo (401)` / `(403)` | `API_KEY`/`API_TOKEN` incorrectos, o mezclados entre cámaras (el Fog identifica la cámara solo por ellos). |
+| `UPLOAD: fallo (401)` / `(403)` | `camera.apiKey`/`apiToken` aprovisionados incorrectos, o mezclados entre cámaras (el Fog identifica la cámara solo por ellos). Reaprovisiona (§6.6). |
 | `UPLOAD: fallo (405)` | La URL apunta a `/api/v1/cameras/<id>/frames` (solo `GET` de administración en el Fog); la buena es `/api/v1/camera/frames`. |
-| Dos cámaras subiendo como la misma (mismas fotos mezcladas en el Fog) | Comparten `API_KEY`/`API_TOKEN`. Revisar qué `secrets.h` se subió a cada unidad antes de flashear; el `DEVICE_ID` del log de arranque ayuda a identificarla. |
+| Dos cámaras subiendo como la misma (mismas fotos mezcladas en el Fog) | Comparten `apiKey`/`apiToken`: se aprovisionaron con el mismo `provision.local.json`. El `camera=` de la línea `NVS:` del arranque dice qué credencial tiene cada placa. |
 | `Failed to connect… Timed out waiting for packet header` | Falta el puente `IO0`–`GND`, o no pulsaste RST antes de subir. |
 | Reinicios al conectar el WiFi | Falta el condensador de 470–1000 µF; o el FTDI no da corriente suficiente. |
 | La placa se queda en reset con `arduino-cli monitor` abierto | DTR/RTS activos; usar `--config baudrate=115200,dtr=off,rts=off` (la tarea de VS Code ya lo hace). |

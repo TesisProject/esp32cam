@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Graba la WiFi, el host del Fog y (opcional) la calibracion de la bateria en
-  la NVS de una ESP32-CAM por el puerto serie.
+  Graba la WiFi, la credencial de la camara, el host del Fog y (opcional) la
+  calibracion de la bateria en la NVS de una ESP32-CAM por el puerto serie.
 
 .DESCRIPTION
   Implementa el lado PC del contrato C (aprovisionamiento por USB):
@@ -12,7 +12,7 @@
        la ventana de aprovisionamiento aunque la placa ya este aprovisionada).
     4. Espera "PROV: READY", envia la linea y muestra la respuesta
        ("PROV: OK ..." o "PROV: ERROR ...") y el arranque que sigue.
-  La contrasena nunca se imprime.
+  La contrasena, la apiKey y el apiToken nunca se imprimen.
 
   Ficheros sin tildes a proposito: Windows PowerShell 5.1 lee los .ps1 sin
   BOM como ANSI y estropearia los caracteres acentuados.
@@ -69,7 +69,7 @@ if ($Erase) {
   }
   if (-not (Test-Path -LiteralPath $File)) {
     Fail ("No existe '$File'. Copia provision.example.json a provision.local.json " +
-          "(en la raiz del repo) y rellena la WiFi y el host del Fog.")
+          "(en la raiz del repo) y rellena la WiFi, la camara y el host del Fog.")
   }
 
   try {
@@ -80,7 +80,7 @@ if ($Erase) {
 
   # Mismas reglas que provision_module.cpp: fallar aqui es mas claro que leer
   # un "PROV: ERROR" por el serie.
-  $known = @('wifi', 'fogHost', 'fogPort', 'batteryCal')
+  $known = @('wifi', 'camera', 'fogHost', 'fogPort', 'batteryCal')
   foreach ($p in $cfg.PSObject.Properties.Name) {
     if ($known -notcontains $p) { Fail "Campo desconocido en '$File': '$p' (validos: $($known -join ', '))" }
   }
@@ -92,6 +92,20 @@ if ($Erase) {
   if ($pass.Length -lt 8 -or $pass.Length -gt 63) { Fail "wifi.password debe tener entre 8 y 63 caracteres (WPA2; no se aceptan redes abiertas)." }
   if ($pass -cnotmatch '^[\x20-\x7E]+$') { Fail "wifi.password solo admite ASCII imprimible." }
   if ($pass -eq 'CAMBIAR-por-la-real') { Fail "La contrasena es la de la plantilla: edita '$File'." }
+
+  # Credencial: los tres campos juntos (un solo blob en la NVS).
+  if (-not $cfg.camera) { Fail "Falta 'camera' en '$File' ({""id"":""CAM-001"",""apiKey"":""..."",""apiToken"":""...""})." }
+  $camKeys = @('id', 'apiKey', 'apiToken')
+  foreach ($p in $cfg.camera.PSObject.Properties.Name) {
+    if ($camKeys -notcontains $p) { Fail "camera: campo desconocido '$p' (validos: $($camKeys -join ', '))." }
+  }
+  $camId = [string]$cfg.camera.id
+  if ($camId -cnotmatch '^[A-Za-z0-9_-]{1,15}$') { Fail "camera.id debe tener 1-15 caracteres: letras, digitos, '-' y '_' (p. ej. CAM-001)." }
+  foreach ($k in @('apiKey', 'apiToken')) {
+    $v = [string]$cfg.camera.$k
+    if ($v -cnotmatch '^[\x21-\x7E]{1,63}$') { Fail "camera.$k debe tener entre 1 y 63 caracteres ASCII imprimibles, sin espacios." }
+    if ($v -like 'CAMBIAR*') { Fail "camera.$k es el de la plantilla: edita '$File'." }
+  }
   if ($null -ne $cfg.fogHost) {
     if ([string]$cfg.fogHost -notmatch '^[A-Za-z0-9.-]{1,63}$') {
       Fail "fogHost debe ser un nombre o una IP (letras, digitos, '.', '-'; sin http:// ni :puerto)."
@@ -130,7 +144,7 @@ if ($Erase) {
 
   # Una sola linea: el firmware lee hasta '\n'.
   $line = $cfg | ConvertTo-Json -Compress -Depth 5
-  $summary = "wifi.ssid=""$ssid"" fogHost=$($cfg.fogHost) fogPort=$($cfg.fogPort) batteryCal=$calText"
+  $summary = "camera.id=$camId wifi.ssid=""$ssid"" fogHost=$($cfg.fogHost) fogPort=$($cfg.fogPort) batteryCal=$calText"
 }
 
 # --- 2. Puerto ----------------------------------------------------------------
@@ -199,7 +213,7 @@ try {
   }
   if (-not $ready) {
     Fail ("La placa no dijo 'PROV: READY' en $ReadyTimeoutSec s. Comprueba el puerto, " +
-          "que el firmware tenga aprovisionamiento (E6) y que GPIO0 no este a GND.") 3
+          "que el firmware tenga aprovisionamiento (FW_VERSION 2 o mas, con 'camera') y que GPIO0 no este a GND.") 3
   }
 
   # --- 4. Envio y respuesta -----------------------------------------------------

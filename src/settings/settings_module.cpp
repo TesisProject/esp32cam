@@ -1,8 +1,8 @@
 /* ============================================================================
  *  settings_module.cpp  -  Esquema de la NVS sobre Preferences (core ESP32)
  *
- *  Los nombres de clave son el esquema. "schema", "wifi", "fog" y "bat_cal"
- *  no se renombran NUNCA: una placa en campo dejaria de encontrarlos y solo
+ *  Los nombres de clave son el esquema. "schema", "wifi", "fog", "bat_cal" y
+ *  "cred" no se renombran NUNCA: una placa en campo dejaria de encontrarlos y solo
  *  se arregla por USB. Limite de la NVS: 15 caracteres por clave.
  *
  *  En un ciclo normal este modulo solo LEE: no se escribe la flash en cada
@@ -63,12 +63,13 @@ static void terminate(char (&s)[N]) { s[N - 1] = '\0'; }
 /* ---------------------------------------------------------------------------
  * Cambio de esquema: se borra todo MENOS lo que solo se graba por USB
  *
- * WiFi, host del Fog y calibracion de bateria solo llegan por el
+ * WiFi, host del Fog, calibracion de bateria y credencial solo llegan por el
  * aprovisionamiento USB (decision del 2026-10-17: ni el Fog ni la nube
  * cambian la WiFi, y el host nunca vino de la red). Si un firmware nuevo,
- * llegado por OTA, los borrase, la camara ya no encontraria la red o el Fog,
- * ni podria recibir otro OTA que lo arreglase: habria que ir a cada placa con
- * un cable. Lo demas (credencial E7, captura E8...) se vuelve a pedir al Fog.
+ * llegado por OTA, los borrase, la camara ya no encontraria la red o el Fog
+ * (o el Fog la rechazaria, sin credencial), ni podria recibir otro OTA que lo
+ * arreglase: habria que ir a cada placa con un cable. Lo demas (captura
+ * E8...) se vuelve a pedir al Fog.
  *
  * Se borran las claves una a una (no clear() + reescribir: un corte entre las
  * dos dejaria la placa sin WiFi) y el esquema se escribe al final. Si se
@@ -83,6 +84,7 @@ static const UsbKey kUsbKeys[] = {
   { kKeyWifi,   sizeof(SettingsWifi) },
   { kKeyFog,    sizeof(SettingsFog) },
   { kKeyBatCal, sizeof(SettingsBatteryCal) },
+  { kKeyCred,   sizeof(SettingsCredential) },
 };
 
 static bool is_usb_key(const char *key) {
@@ -140,7 +142,7 @@ bool settings_begin() {
   const uint8_t schema = s_prefs.getUChar(kKeySchema, 0);
   if (schema != SETTINGS_SCHEMA_VERSION) {
     if (schema != 0) {
-      LOG("NVS: esquema %u != %u, se borra todo salvo WiFi, Fog y calibracion",
+      LOG("NVS: esquema %u != %u, se borra todo salvo WiFi, Fog, calibracion y credencial",
           (unsigned)schema, (unsigned)SETTINGS_SCHEMA_VERSION);
     }
     reset_keeping_usb_keys();
@@ -165,6 +167,13 @@ bool settings_has_wifi() {
 
 bool settings_set_wifi(const SettingsWifi &wifi) { return put_blob(kKeyWifi, wifi); }
 
+bool settings_is_provisioned() {
+  SettingsCredential c;
+  const bool ok = settings_has_wifi() && settings_get_credential(c);
+  memset(&c, 0, sizeof(c));   // no dejar el token en la pila
+  return ok;
+}
+
 /* ---------------------------------------------------------------------------
  * Fog
  * -------------------------------------------------------------------------*/
@@ -182,14 +191,15 @@ bool settings_get_fog(SettingsFog &out) {
 bool settings_set_fog(const SettingsFog &fog) { return put_blob(kKeyFog, fog); }
 
 /* ---------------------------------------------------------------------------
- * Credencial (E7)
+ * Credencial
  * -------------------------------------------------------------------------*/
 bool settings_get_credential(SettingsCredential &out) {
   if (!get_blob(kKeyCred, out)) return false;
   terminate(out.camera_code);
   terminate(out.api_key);
   terminate(out.api_token);
-  return out.api_key[0] != '\0' && out.api_token[0] != '\0';
+  return out.camera_code[0] != '\0' && out.api_key[0] != '\0' &&
+         out.api_token[0] != '\0';
 }
 
 bool settings_set_credential(const SettingsCredential &cred) {

@@ -9,7 +9,7 @@
  *  todo de una vez y evita la complejidad de un body en streaming/chunked.
  * ==========================================================================*/
 #include "upload_module.h"
-#include "../../config.h"   // incluye tambien secrets.h
+#include "../../config.h"
 
 #include <HTTPClient.h>
 #include <esp_heap_caps.h>
@@ -107,9 +107,14 @@ static size_t build_telemetry(const UploadTelemetry &t) {
 }
 
 int upload_frame(const char *fog_host, uint16_t fog_port,
+                 const char *api_key, const char *api_token,
                  camera_fb_t *fb, const UploadTelemetry *telemetry) {
   if (!fog_host || fog_host[0] == '\0' || fog_port == 0) {
     LOG("UPLOAD: sin host/puerto del Fog, no se sube");
+    return -1;
+  }
+  if (!api_key || api_key[0] == '\0' || !api_token || api_token[0] == '\0') {
+    LOG("UPLOAD: sin credencial, no se sube (el Fog responderia 401)");
     return -1;
   }
   if (!fb || !fb->buf || fb->len == 0) {
@@ -165,8 +170,8 @@ int upload_frame(const char *fog_host, uint16_t fog_port,
   HTTPClient http;
   http.begin(url);
   http.setTimeout(WIFI_CONNECT_TIMEOUT_MS);
-  http.addHeader("X-API-Key", API_KEY);
-  http.addHeader("X-API-Token", API_TOKEN);
+  http.addHeader("X-API-Key", api_key);
+  http.addHeader("X-API-Token", api_token);
   http.addHeader("Content-Type", String("multipart/form-data; boundary=") + kBoundary);
 
   LOG("UPLOAD: POST %s (%u bytes)", url.c_str(), (unsigned)total_len);

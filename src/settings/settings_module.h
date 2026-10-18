@@ -5,22 +5,25 @@
  *  otro modulo abre la NVS: asi el esquema esta en un solo sitio y se puede
  *  versionar (SETTINGS_SCHEMA_VERSION en config.h).
  *
- *  Esquema completo desde E6, aunque E6 solo use WiFi y Fog:
+ *  Esquema completo desde E6:
  *
  *    clave       tipo   contenido                                  usa
  *    ---------   ----   ----------------------------------------   ---
  *    schema      u8     version del esquema                        E6
  *    wifi        blob   WiFi (SettingsWifi), CONGELADO             E6
  *    fog         blob   host y puerto del Fog (SettingsFog), CONG.  E6
- *    cred        blob   codigo de camara + API key/token           E7
+ *    cred        blob   id de camara + API key/token, CONG.        cred
  *    capture     blob   intervalo, framesize, calidad              E8
  *    cfg_rev     u32    ultima revision de config aplicada         E8
  *    ota_rej     u32    version OTA rechazada por rollback         E5
  *    bat_cal     blob   calibracion del divisor de bateria, CONG.  bateria
  *
- *  wifi, fog y bat_cal (CONG. = congelados) solo se graban por USB y ningun
- *  cambio de esquema los borra (ver reset_keeping_usb_keys() en el .cpp): ni
- *  el Fog ni la nube los cambian (decision del 2026-10-17). Las claves wifi_pend,
+ *  wifi, fog, bat_cal y cred (CONG. = congelados) solo se graban por USB y
+ *  ningun cambio de esquema los borra (ver reset_keeping_usb_keys() en el
+ *  .cpp): ni el Fog ni la nube los cambian (decision del 2026-10-17; la
+ *  credencial paso a USB el mismo dia, para tener un unico .bin sin
+ *  secrets.h). Una placa esta aprovisionada cuando tiene wifi Y cred
+ *  (settings_is_provisioned()). Las claves wifi_pend,
  *  wifi_tries y wifi_rej del plan E8 se retiraron sin llegar a escribirse;
  *  no reutilizar esos nombres para otra cosa.
  *
@@ -43,7 +46,7 @@
 #include <Arduino.h>
 #include "../../config.h"
 
-/* wifi, fog y bat_cal: CONGELADOS. Si cambiase su tamano, la NVS de las
+/* wifi, fog, bat_cal y cred: CONGELADOS. Si cambiase su tamano, la NVS de las
  * placas ya no encajaria y reset_keeping_usb_keys() los descartaria: habria
  * que reaprovisionar cada placa por USB. 32 + 63 son los maximos de WPA2 y
  * 63 los de un nombre de host razonable: no hay motivo para cambiarlos. */
@@ -59,11 +62,15 @@ struct SettingsFog {
 };
 static_assert(sizeof(SettingsFog) == 66, "SettingsFog esta congelado: ver SettingsWifi");
 
+/* Lo que identifica a la camara ante el Fog: api_key/api_token van en las
+ * cabeceras X-API-Key/X-API-Token de cada POST. camera_code ("CAM-001") solo
+ * sale en el log, para saber que unidad es; no viaja en la peticion. */
 struct SettingsCredential {
   char camera_code[CAM_CODE_MAX_LEN + 1];
   char api_key[API_SECRET_MAX_LEN + 1];
   char api_token[API_SECRET_MAX_LEN + 1];
 };
+static_assert(sizeof(SettingsCredential) == 144, "SettingsCredential esta congelado: ver SettingsWifi");
 
 /* Dos puntos (tension en GPIO13, tension real del pack), medidos a la vez
  * con el monitor serie y un multimetro. Ver la seccion de bateria de config.h. */
@@ -91,12 +98,16 @@ bool settings_has_wifi();
 bool settings_get_wifi(SettingsWifi &out);
 bool settings_set_wifi(const SettingsWifi &wifi);
 
+/* WiFi Y credencial: sin cualquiera de las dos no se puede subir nada. */
+bool settings_is_provisioned();
+
 /* --- Fog (E6). Sin valor en la NVS, devuelve los defectos de config.h ------
  * Devuelve true si el valor viene de la NVS y false si son los defectos. */
 bool settings_get_fog(SettingsFog &out);
 bool settings_set_fog(const SettingsFog &fog);
 
-/* --- Credencial de la camara (E7) ------------------------------------------*/
+/* --- Credencial de la camara. Solo la escribe el aprovisionamiento por USB --
+ * false si no hay o le falta algun campo. */
 bool settings_get_credential(SettingsCredential &out);
 bool settings_set_credential(const SettingsCredential &cred);
 bool settings_clear_credential();

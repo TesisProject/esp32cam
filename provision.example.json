@@ -1,5 +1,6 @@
 {
   "wifi": { "ssid": "ParkVisionFog1", "password": "CAMBIAR-por-la-real" },
+  "camera": { "id": "CAM-001", "apiKey": "CAMBIAR-api-key", "apiToken": "CAMBIAR-api-token" },
   "fogHost": "192.168.1.20",
   "fogPort": 8000
 }

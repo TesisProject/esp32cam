@@ -6,7 +6,7 @@
  *  valores hardcodeados: ni pines, ni umbrales, ni intervalos.
  *
  *  Pero lo que es propio de cada placa o de cada despliegue (WiFi, host del
- *  Fog y, mas adelante, credencial y parametros de captura) NO se compila:
+ *  Fog, credencial y, mas adelante, parametros de captura) NO se compila:
  *  vive en la NVS de la placa (ver src/settings/), se graba una vez por USB
  *  (scripts/provision.ps1) y la nube lo actualizara via el Fog. Lo que aqui
  *  aparezca para esos datos es solo el valor por defecto cuando la NVS no
@@ -31,7 +31,7 @@
  * una mayor que la mia?") sin parsear cadenas tipo "1.4.0". Viaja al Fog
  * como fw_version en cada POST y sale en el log de arranque.
  * SUBIRLO antes de compilar cualquier binario que vaya a otra placa. */
-#define FW_VERSION             1
+#define FW_VERSION             2
 
 /* ===========================================================================
  * 2. WIFI  (solo modo estacion: un AP propio impediria dormir la radio)
@@ -42,35 +42,12 @@
  *  (seccion 8 y scripts/provision.ps1). No estan en el binario: el mismo
  *  .bin sirve para cualquier red, y publicar el repo no regala el WiFi.
  *
- * --- Credenciales de la camara: secrets.h (provisional, hasta E7) --------
+ * --- Credencial de la camara: tambien en la NVS ---------------------------
  *
- *  DEVICE_ID, API_KEY y API_TOKEN siguen en secrets.h, que git NO versiona,
- *  hasta que la camara las obtenga sola con el alta por MAC.
- *
- *  Si acabas de clonar el repositorio:
- *      copy secrets.h.example secrets.h      (y rellena los tres valores)
+ *  El id de camara (CAM-001...), X-API-Key y X-API-Token se graban por USB
+ *  en la misma linea de aprovisionamiento ("camera", seccion 8). Ya no hay
+ *  secrets.h: un unico .bin para las tres camaras, sin secretos dentro.
  * ------------------------------------------------------------------------*/
-#if defined(__has_include)
-  #if __has_include("secrets.h")
-    #include "secrets.h"
-  #endif
-#else
-  #include "secrets.h"
-#endif
-
-#if !defined(DEVICE_ID) || !defined(API_KEY) || !defined(API_TOKEN)
-  #error "Falta secrets.h (o le faltan valores). Copia secrets.h.example a secrets.h y rellena DEVICE_ID, API_KEY y API_TOKEN."
-#endif
-
-/* Un secrets.h antiguo puede traer aun WIFI_SSID/WIFI_PASSWORD. Se anulan
- * para que ningun codigo vuelva a usarlos por descuido (no compilaria) y no
- * acaben dentro del .bin. Borralos de tu secrets.h: ya no hacen nada. */
-#ifdef WIFI_SSID
-  #undef WIFI_SSID
-#endif
-#ifdef WIFI_PASSWORD
-  #undef WIFI_PASSWORD
-#endif
 
 /* Limites de la red que se aceptan al aprovisionar (802.11 / WPA2-PSK):
  * SSID de 1 a 32 bytes; contrasena WPA2 de 8 a 63 caracteres. Las redes
@@ -276,17 +253,20 @@
  *
  *  src/settings/settings_module.* es la UNICA puerta a la NVS. El esquema
  *  completo (WiFi, Fog, credencial, captura, revision, OTA rechazada) existe
- *  desde E6 aunque de momento solo se usen WiFi, Fog y bateria.
+ *  desde E6; de momento se usan WiFi, Fog, credencial y bateria.
  *  Tamanos maximos de lo que se guarda: fijan el tamano de los blobs, asi
  *  que cambiarlos invalida lo ya guardado (ver SETTINGS_SCHEMA_VERSION).
  * ==========================================================================*/
 #define SETTINGS_NVS_NAMESPACE     "parkvision"   // max. 15 caracteres (limite NVS)
 /* Subirlo solo si cambia la forma de un blob: al arrancar, la placa borra
- * todo su namespace MENOS lo grabado por USB (WiFi, Fog, calibracion). Con OTA
- * eso pasa en todas las camaras a la vez y se pierde credencial, captura... Preferible: dato nuevo = clave nueva
- * (asi se anadio bat_cal) y dejar esto en 1. */
+ * todo su namespace MENOS lo grabado por USB (WiFi, Fog, calibracion,
+ * credencial). Con OTA eso pasa en todas las camaras a la vez y se pierde la
+ * captura... Preferible: dato nuevo = clave nueva (asi se anadio bat_cal) y
+ * dejar esto en 1. */
 #define SETTINGS_SCHEMA_VERSION    1
 
+/* CAM_CODE_MAX_LEN y API_SECRET_MAX_LEN fijan el blob "cred", que esta
+ * CONGELADO (144 B, ver settings_module.h): no cambiarlos. */
 #define CAM_CODE_MAX_LEN           15   // "CAM-001"
 #define API_SECRET_MAX_LEN         63   // X-API-Key / X-API-Token del Fog
 #define CAP_FRAMESIZE_MAX_LEN      7    // "SVGA", "QVGA"... (nombre del enum)
@@ -294,9 +274,12 @@
 /* ===========================================================================
  * 8. APROVISIONAMIENTO POR USB  -  una vez por placa
  *
- *  Sin WiFi en la NVS la placa no puede hacer nada util: espera por serie
- *  una linea JSON (contrato C, la envia scripts/provision.ps1)
- *      {"wifi":{"ssid":"...","password":"..."},"fogHost":"...","fogPort":8000}
+ *  Sin WiFi o sin credencial en la NVS la placa no puede hacer nada util:
+ *  espera por serie una linea JSON (contrato C, la envia
+ *  scripts/provision.ps1 o se pega en el monitor serie)
+ *      {"wifi":{"ssid":"...","password":"..."},
+ *       "camera":{"id":"CAM-001","apiKey":"...","apiToken":"..."},
+ *       "fogHost":"...","fogPort":8000}
  *  la valida, la guarda y reinicia. Si no llega en PROV_WAIT_MS, duerme
  *  PROV_RETRY_SLEEP_MS y lo vuelve a intentar: en campo, sin USB, esperar
  *  indefinidamente agotaria las pilas.
@@ -315,7 +298,8 @@
 #define PROV_WINDOW_MS             3000UL      // arranque en frio ya aprovisionado.
                                                // El script envia en cuanto ve
                                                // "PROV: READY", asi que 3 s sobran
-#define PROV_LINE_MAX_LEN          512         // la linea completa ocupa ~200 B
+#define PROV_LINE_MAX_LEN          512         // la linea completa ocupa ~350 B
+                                               // con key y token de 63
 #define PROV_SERIAL_RX_BUFFER      1024        // buffer RX de la UART (256 por
                                                // defecto: justo para una linea
                                                // con caracteres escapados)

@@ -2,9 +2,12 @@
  *  provision_module.h  -  Aprovisionamiento por USB (puerto serie)
  *
  *  Protocolo (contrato C), una linea JSON terminada en '\n':
- *    {"wifi":{"ssid":"...","password":"..."},"fogHost":"...","fogPort":8000}
+ *    {"wifi":{"ssid":"...","password":"..."},
+ *     "camera":{"id":"CAM-001","apiKey":"...","apiToken":"..."},
+ *     "fogHost":"...","fogPort":8000}
  *    {"cmd":"erase"}                       -> borra la NVS del proyecto
- *  Opcional en la primera forma (y suficiente por si sola al reaprovisionar):
+ *  wifi y camera son obligatorios solo si la NVS aun no los tiene: al
+ *  reaprovisionar basta con lo que cambie. Opcional:
  *    "batteryCal":{"adcA":2610,"batA":3700,"adcB":2720,"batB":4150}
  *  (mV en GPIO13 y mV reales del pack, dos puntos; ver config.h). Sin ella
  *  se usan los defectos de config.h.
@@ -22,6 +25,6 @@
 /* Escucha el puerto serie durante window_ms. Con una linea valida guarda en
  * la NVS (via settings_module) y reinicia: en ese caso NO retorna. Retorna
  * al agotarse la ventana sin configuracion valida.
- * wifi_required: true si la NVS no tiene WiFi (una linea sin "wifi" no basta
- * para dejar la placa operativa). */
-void provision_listen(uint32_t window_ms, bool wifi_required);
+ * Lo que la linea tiene que traer (wifi, camera) lo decide segun lo que ya
+ * haya en la NVS: tras guardar, la placa debe quedar aprovisionada. */
+void provision_listen(uint32_t window_ms);

@@ -13,10 +13,11 @@ build/
 sketch.json
 
 # --- Credenciales ----------------------------------------------------------
-# DEVICE_ID/API_KEY/API_TOKEN (hasta que llegue el alta por MAC).
+# secrets.h ya no existe (la credencial va en la NVS); se sigue ignorando
+# para que una copia vieja con claves reales no se cuele en un commit.
 secrets.h
 **/secrets.h
-# WiFi y host del Fog que scripts/provision.ps1 graba en la NVS de la placa.
+# WiFi, credencial y host del Fog que scripts/provision.ps1 graba en la NVS.
 # La plantilla versionada es provision.example.json.
 provision.local.json
 **/provision.local.json

@@ -60,6 +60,43 @@ static bool valid_host(const char *h, const char **why) {
   return true;
 }
 
+/* Identificador de la camara: solo para el log, pero se limita a lo que
+ * tiene un "CAM-001" para que un campo mal pegado se vea al aprovisionar. */
+static bool valid_camera_id(const char *s, const char **why) {
+  const size_t n = strlen(s);
+  if (n == 0 || n > CAM_CODE_MAX_LEN) {
+    *why = "camera.id debe tener entre 1 y 15 caracteres (p. ej. CAM-001)";
+    return false;
+  }
+  for (size_t i = 0; i < n; i++) {
+    const char c = s[i];
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_';
+    if (!ok) { *why = "camera.id solo admite letras, digitos, '-' y '_'"; return false; }
+  }
+  return true;
+}
+
+/* apiKey/apiToken van tal cual en una cabecera HTTP: nada de espacios ni de
+ * caracteres de control. Un espacio o un salto de linea pegado al copiar la
+ * credencial daria un 401 en cada ciclo, sin pista en el log de por que. */
+static bool valid_api_secret(const char *s, const char *field, const char **why) {
+  static char msg[96];
+  const size_t n = strlen(s);
+  bool ok = n >= 1 && n <= API_SECRET_MAX_LEN;
+  for (size_t i = 0; ok && i < n; i++) {
+    const unsigned char c = (unsigned char)s[i];
+    ok = c >= 0x21 && c <= 0x7E;
+  }
+  if (!ok) {
+    snprintf(msg, sizeof(msg),
+             "camera.%s debe tener entre 1 y 63 caracteres ASCII imprimibles, sin espacios",
+             field);
+    *why = msg;
+  }
+  return ok;
+}
+
 /* ---------------------------------------------------------------------------
  * Procesado de una linea. Solo retorna si hay error (con exito reinicia).
  * -------------------------------------------------------------------------*/
@@ -69,7 +106,7 @@ static void restart_now() {
   ESP.restart();
 }
 
-static void handle_line(size_t len, bool wifi_required) {
+static void handle_line(size_t len) {
   cJSON *root = cJSON_ParseWithLength(s_line, len);
   if (!cJSON_IsObject(root)) {
     PROV_REPLY("ERROR JSON invalido (se espera un objeto en una sola linea)");
@@ -82,7 +119,8 @@ static void handle_line(size_t len, bool wifi_required) {
   /* Campos desconocidos = error: un "fog_host" mal escrito se ignoraria en
    * silencio y la placa seguiria con el host por defecto. */
   for (const cJSON *it = root->child; it; it = it->next) {
-    if (strcmp(it->string, "wifi") != 0 && strcmp(it->string, "fogHost") != 0 &&
+    if (strcmp(it->string, "wifi") != 0 && strcmp(it->string, "camera") != 0 &&
+        strcmp(it->string, "fogHost") != 0 &&
         strcmp(it->string, "fogPort") != 0 && strcmp(it->string, "batteryCal") != 0 &&
         strcmp(it->string, "cmd") != 0) {
       PROV_REPLY("ERROR campo desconocido: \"%s\"", it->string);
@@ -124,8 +162,35 @@ static void handle_line(size_t len, bool wifi_required) {
       strlcpy(wifi.ssid, ssid->valuestring, sizeof(wifi.ssid));
       strlcpy(wifi.password, pass->valuestring, sizeof(wifi.password));
     }
-  } else if (wifi_required) {
+  } else if (!settings_has_wifi()) {
     why = "falta \"wifi\": la placa no tiene red guardada";
+  }
+
+  /* --- Credencial de la camara ----------------------------------------------
+   * Los tres campos juntos: van en un solo blob, y una key de una camara con
+   * el token de otra daria 401 sin forma de saber cual esta mal. */
+  SettingsCredential cred = {};
+  const cJSON *jcam = cJSON_GetObjectItemCaseSensitive(root, "camera");
+  if (!why && jcam) {
+    const cJSON *id  = cJSON_GetObjectItemCaseSensitive(jcam, "id");
+    const cJSON *key = cJSON_GetObjectItemCaseSensitive(jcam, "apiKey");
+    const cJSON *tok = cJSON_GetObjectItemCaseSensitive(jcam, "apiToken");
+    if (!cJSON_IsObject(jcam) || cJSON_GetArraySize(jcam) != 3 || !cJSON_IsString(id) ||
+        !cJSON_IsString(key) || !cJSON_IsString(tok)) {
+      why = "camera debe ser {\"id\":\"CAM-001\",\"apiKey\":\"...\",\"apiToken\":\"...\"}";
+    } else if (valid_camera_id(id->valuestring, &why) &&
+               valid_api_secret(key->valuestring, "apiKey", &why) &&
+               valid_api_secret(tok->valuestring, "apiToken", &why)) {
+      strlcpy(cred.camera_code, id->valuestring, sizeof(cred.camera_code));
+      strlcpy(cred.api_key, key->valuestring, sizeof(cred.api_key));
+      strlcpy(cred.api_token, tok->valuestring, sizeof(cred.api_token));
+    }
+  } else if (!why) {
+    SettingsCredential current;
+    if (!settings_get_credential(current)) {
+      why = "falta \"camera\": la placa no tiene credencial guardada";
+    }
+    memset(&current, 0, sizeof(current));
   }
 
   /* --- Fog ----------------------------------------------------------------*/
@@ -172,57 +237,75 @@ static void handle_line(size_t len, bool wifi_required) {
     if (!why) settings_battery_cal_valid(cal, &why);
   }
 
-  if (!why && !jwifi && !jhost && !jport && !jcal) why = "nada que guardar";
+  if (!why && !jwifi && !jcam && !jhost && !jport && !jcal) why = "nada que guardar";
   cJSON_Delete(root);
 
   if (why) {
+    memset(&wifi, 0, sizeof(wifi));
+    memset(&cred, 0, sizeof(cred));
     PROV_REPLY("ERROR %s", why);
     return;
   }
 
-  /* --- Escritura: Fog antes que WiFi --------------------------------------
-   * La WiFi es la que marca la placa como aprovisionada. Si la alimentacion
-   * se corta entre las dos escrituras, la placa sigue "sin aprovisionar" y
-   * vuelve a pedir la linea, en vez de quedar con WiFi nueva y Fog viejo. */
+  /* --- Escritura: la WiFi la ultima -----------------------------------------
+   * La WiFi es la que marca una placa nueva como aprovisionada. Si la
+   * alimentacion se corta entre escrituras, la placa sigue "sin aprovisionar"
+   * y vuelve a pedir la linea, en vez de quedar con WiFi nueva y Fog o
+   * credencial viejos. */
+  const char *write_err = nullptr;
   if ((jhost || jport) && !settings_set_fog(fog)) {
-    PROV_REPLY("ERROR no se pudo escribir el Fog en la NVS");
+    write_err = "el Fog";
+  } else if (jcal && !settings_set_battery_cal(cal)) {
+    write_err = "la calibracion de bateria";
+  }
+  if (write_err) {
+    memset(&wifi, 0, sizeof(wifi));
+    memset(&cred, 0, sizeof(cred));
+    PROV_REPLY("ERROR no se pudo escribir %s en la NVS", write_err);
     return;
   }
-  if (jcal && !settings_set_battery_cal(cal)) {
-    PROV_REPLY("ERROR no se pudo escribir la calibracion de bateria en la NVS");
+  const bool cred_ok = !jcam || settings_set_credential(cred);
+  memset(&cred, 0, sizeof(cred));   // no dejar el token en RAM
+  if (!cred_ok) {
+    memset(&wifi, 0, sizeof(wifi));
+    PROV_REPLY("ERROR no se pudo escribir la credencial en la NVS");
     return;
   }
-  if (jwifi && !settings_set_wifi(wifi)) {
+  const bool wifi_ok = !jwifi || settings_set_wifi(wifi);
+  memset(&wifi, 0, sizeof(wifi));   // no dejar la contrasena en RAM
+  if (!wifi_ok) {
     PROV_REPLY("ERROR no se pudo escribir la WiFi en la NVS");
     return;
   }
-  memset(&wifi, 0, sizeof(wifi));   // no dejar la contrasena en RAM
 
   SettingsWifi saved = {};
   settings_get_wifi(saved);
+  SettingsCredential saved_cred = {};
+  settings_get_credential(saved_cred);
   SettingsBatteryCal saved_cal;
   const bool cal_from_nvs = settings_get_battery_cal(saved_cal);
-  /* La contrasena nunca sale por el serie. El SSID si: no es secreto y es lo
-   * que hay que comprobar a ojo. */
-  PROV_REPLY("OK guardado: wifi=\"%s\" fog=%s:%u bat=%u->%u,%u->%u (%s). Reiniciando",
-             saved.ssid, fog.host, (unsigned)fog.port,
+  /* La contrasena, la key y el token nunca salen por el serie. El SSID y el
+   * id de camara si: no son secretos y es lo que hay que comprobar a ojo. */
+  PROV_REPLY("OK guardado: camera=%s wifi=\"%s\" fog=%s:%u bat=%u->%u,%u->%u (%s). Reiniciando",
+             saved_cred.camera_code, saved.ssid, fog.host, (unsigned)fog.port,
              (unsigned)saved_cal.adc_a_mv, (unsigned)saved_cal.bat_a_mv,
              (unsigned)saved_cal.adc_b_mv, (unsigned)saved_cal.bat_b_mv,
              cal_from_nvs ? "NVS" : "defecto");
   memset(&saved, 0, sizeof(saved));
+  memset(&saved_cred, 0, sizeof(saved_cred));
   restart_now();
 }
 
 /* ---------------------------------------------------------------------------
  * Escucha
  * -------------------------------------------------------------------------*/
-void provision_listen(uint32_t window_ms, bool wifi_required) {
+void provision_listen(uint32_t window_ms) {
   /* Lo que haya llegado antes de abrir la ventana (ruido del arranque) no es
    * una linea del script: este solo escribe despues de ver READY. */
   while (Serial.available()) Serial.read();
 
   PROV_REPLY("READY modo=%s ventana=%lu ms. Enviar una linea JSON",
-             wifi_required ? "aprovisionar" : "reaprovisionar",
+             settings_is_provisioned() ? "reaprovisionar" : "aprovisionar",
              (unsigned long)window_ms);
 
   size_t len = 0;
@@ -243,7 +326,7 @@ void provision_listen(uint32_t window_ms, bool wifi_required) {
         PROV_REPLY("ERROR linea demasiado larga (max. %u bytes)", (unsigned)PROV_LINE_MAX_LEN);
       } else if (len > 0) {
         s_line[len] = '\0';
-        handle_line(len, wifi_required);   // solo vuelve si hubo error
+        handle_line(len);   // solo vuelve si hubo error
       }
       memset(s_line, 0, sizeof(s_line));
       len = 0;

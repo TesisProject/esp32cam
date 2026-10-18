@@ -3,8 +3,10 @@
  *  Proyecto de tesis UPC "ParkVision"
  *
  *  Cada despertar del deep sleep ejecuta un ciclo completo dentro de setup():
- *    0. Leer la configuracion de la placa de la NVS (WiFi, Fog). Si no hay
- *       WiFi, modo aprovisionamiento por USB y nada mas (ver abajo).
+ *    0. Leer la configuracion de la placa de la NVS (WiFi, credencial, Fog).
+ *       Si falta la WiFi o la credencial, modo aprovisionamiento por USB y
+ *       nada mas (ver abajo). El binario no lleva nada propio de una placa:
+ *       el mismo .bin sirve para las tres camaras.
  *    1. Medir la bateria (GPIO13 es ADC2: antes del WiFi). Si esta por
  *       debajo del corte, dormir sin encender camara ni WiFi.
  *    2. Inicializar la camara.
@@ -21,8 +23,9 @@
  *  confirma tras una subida 2xx (rollback, ver ota_module.cpp).
  *
  *  Aprovisionamiento (src/provision/, scripts/provision.ps1):
- *    - NVS sin WiFi: se espera la linea JSON por serie PROV_WAIT_MS; si no
- *      llega, deep sleep PROV_RETRY_SLEEP_MS (sin USB no hay quien la mande).
+ *    - NVS sin WiFi o sin credencial: se espera la linea JSON por serie
+ *      PROV_WAIT_MS; si no llega, deep sleep PROV_RETRY_SLEEP_MS (sin USB no
+ *      hay quien la mande).
  *    - Ya aprovisionada y arranque en frio (encendido / RST / pulso RTS del
  *      script): ventana corta PROV_WINDOW_MS para reescribir o borrar.
  *    - Despertar de deep sleep: ninguna espera. Los ciclos normales no pagan.
@@ -97,7 +100,7 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(200);
   Serial.println();
-  LOG("=== %s (%s) ===", DEVICE_NAME, DEVICE_ID);
+  LOG("=== %s ===", DEVICE_NAME);   // el id de camara sale con la NVS, mas abajo
   ota_log_boot_info();   // FW_VERSION + particion activa
 
   const esp_reset_reason_t reset_reason = esp_reset_reason();
@@ -133,9 +136,9 @@ void setup() {
    * Antes que la camara: si no hay WiFi no se va a subir nada, y arrancar el
    * sensor solo gastaria. */
   settings_begin();
-  if (!settings_has_wifi()) {
-    LOG("PROV: la NVS no tiene WiFi: modo aprovisionamiento");
-    provision_listen(PROV_WAIT_MS, true);   // con una linea valida reinicia
+  if (!settings_is_provisioned()) {
+    LOG("PROV: la NVS no tiene WiFi o credencial: modo aprovisionamiento");
+    provision_listen(PROV_WAIT_MS);   // con una linea valida reinicia
     LOG("PROV: no llego configuracion en %lu ms", (unsigned long)PROV_WAIT_MS);
     go_to_sleep(PROV_RETRY_SLEEP_MS);
   }
@@ -145,15 +148,17 @@ void setup() {
    * ventana, asi que no alarga ningun ciclo normal. Tampoco ESP_RST_SW, que
    * es el reinicio que sigue a un aprovisionamiento correcto. */
   if (reset_reason == ESP_RST_POWERON) {
-    provision_listen(PROV_WINDOW_MS, false);
+    provision_listen(PROV_WINDOW_MS);
   }
 
   SettingsWifi wifi;
   settings_get_wifi(wifi);
+  SettingsCredential cred;
+  settings_get_credential(cred);
   SettingsFog fog;
   const bool fog_from_nvs = settings_get_fog(fog);
-  LOG("NVS: wifi=\"%s\"  fog=%s:%u (%s)", wifi.ssid, fog.host, (unsigned)fog.port,
-      fog_from_nvs ? "NVS" : "defecto de config.h");
+  LOG("NVS: camera=%s  wifi=\"%s\"  fog=%s:%u (%s)", cred.camera_code, wifi.ssid,
+      fog.host, (unsigned)fog.port, fog_from_nvs ? "NVS" : "defecto de config.h");
 
   /* --- Bateria ------------------------------------------------------------------
    * Antes que la camara (lectura en reposo, sin los ~100 mA del sensor) y,
@@ -219,7 +224,7 @@ void setup() {
      * cota inferior, comparable entre ciclos, no el consumo exacto. */
     t.awake_ms         = millis();
 
-    const int code = upload_frame(fog.host, fog.port, fb, &t);
+    const int code = upload_frame(fog.host, fog.port, cred.api_key, cred.api_token, fb, &t);
     if (code >= 200 && code < 300) {
       LOG("UPLOAD: ok (%d)", code);
       /* Unico punto donde se da por buena una imagen nueva: WiFi conectado y

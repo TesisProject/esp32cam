@@ -1,7 +1,7 @@
 /* ============================================================================
  *  upload_module.h  -  Sube un frame JPEG a la Raspberry Pi (fog node)
- *  Ruta: config.h (FOG_FRAMES_PATH). Host/puerto: NVS. Credencial: secrets.h
- *  (hasta E7).
+ *  Ruta: config.h (FOG_FRAMES_PATH). Host/puerto y credencial: NVS (los pasa
+ *  el llamador).
  * ==========================================================================*/
 #pragma once
 
@@ -37,10 +37,12 @@ struct UploadTelemetry {
 };
 
 /* POST multipart/form-data del frame al Fog (la camara la resuelve el Fog
- * por la credencial, no por la URL). Host y puerto los pasa el llamador
- * (NVS o defectos de config.h): este modulo no lee la NVS.
+ * por la credencial, no por la URL). Host, puerto y credencial los pasa el
+ * llamador (NVS o defectos de config.h): este modulo no lee la NVS.
+ * api_key/api_token van en X-API-Key/X-API-Token.
  * telemetry puede ser nullptr: entonces solo se manda "file".
  * Devuelve el codigo de respuesta HTTP (200-299 = ok), o un valor negativo
  * (ver HTTPClient.h) si fallo antes de recibir respuesta (timeout, DNS, ...). */
 int upload_frame(const char *fog_host, uint16_t fog_port,
+                 const char *api_key, const char *api_token,
                  camera_fb_t *fb, const UploadTelemetry *telemetry);

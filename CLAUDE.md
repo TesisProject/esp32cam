@@ -12,17 +12,20 @@ resultado a la nube, y entre captura y captura se apaga casi por completo
 servidor HTTP local: eso era la arquitectura anterior (ver "Migración" abajo).
 
 Hay **3 unidades físicas** (`CAM-001`, `CAM-002`, `CAM-003`), mismo código
-fuente. La WiFi y el host del Fog se graban por USB en la NVS de cada placa
-(ver "Aprovisionamiento"). Hasta E7 (alta por MAC), cada una lleva todavía su
-propio `secrets.h` (`DEVICE_ID`/`API_KEY`/`API_TOKEN`) al flashearla.
+fuente y **un único `.bin`** sin secretos: la WiFi, la credencial
+(`camera`: id, `apiKey`, `apiToken`) y el host del Fog se graban por USB en
+la NVS de cada placa (ver "Aprovisionamiento"). `secrets.h` ya no existe
+(desde `FW_VERSION` 2).
 
 **Rumbo (decisión del 2026-10-12):** toda la configuración se define en la
 nube, el Fog la descarga y cada ESP32 lee la suya del Fog; un único `.bin`
 para las tres cámaras, sin secretos dentro. **Excepción (2026-10-17): la
-WiFi y el host del Fog solo se graban por USB**, nunca por red (ver "OTA y
-configuración por USB"). Plan y contratos:
-`../delegacion-cambios-2026-10-11.md`, revisión 3 (E6 hecho; E7, E8 y E5
-pendientes).
+WiFi, el host del Fog y la credencial solo se graban por USB**, nunca por
+red (ver "OTA y configuración por USB"). La credencial pasó a USB el mismo
+día a petición del usuario, en lugar del alta por MAC de E7. Plan y
+contratos: `../delegacion-cambios-2026-10-11.md`, revisión 3 (E6 hecho; la
+credencial por USB sustituye a E7 y el contrato C del plan no lo refleja
+aún; E8 y E5 pendientes).
 
 El sketch está en la raíz del repo (`esp32cam.ino`). El sketch original
 (fotos a microSD) se eliminó del repo en `d17d837`.
@@ -83,9 +86,7 @@ preguntar: fue un requisito explícito del usuario.
 esp32cam/                       ← carpeta = nombre del .ino (lo exigen IDE y CLI)
 ├── esp32cam.ino                Orquestador: setup() = un ciclo completo -> deep sleep. No hay loop() real.
 ├── config.h                    TODAS las constantes y los valores por defecto
-├── secrets.h                   DEVICE_ID/API_KEY/API_TOKEN (hasta E7) — gitignored
-├── secrets.h.example           Plantilla de secrets.h
-├── provision.example.json      Plantilla de la línea de aprovisionamiento (WiFi + Fog)
+├── provision.example.json      Plantilla de la línea de aprovisionamiento (WiFi + credencial + Fog)
 ├── provision.local.json        La real, por placa/red — gitignored
 ├── scripts/provision.ps1       Envía la línea por serie (reinicia la placa por RTS)
 ├── tools/battery_monitor/      Sketch aparte de banco: AP propio + web con la batería (copia la recta)
@@ -105,8 +106,7 @@ recursiva; cualquier otra subcarpeta se ignora. Módulos nuevos en
 `src/<nombre>/<nombre>_module.*`. El sufijo `_module` evita nombres como
 `wifi.h`, que en Windows (sin distinción de mayúsculas) se confunde con
 `<WiFi.h>` del core. Los módulos incluyen `"../../config.h"`;
-`config.h`/`secrets.h` se quedan en la raíz porque es lo que se edita al
-flashear. El IDE 2.x no muestra `src/` como pestañas.
+`config.h` se queda en la raíz porque es lo que se edita al compilar. El IDE 2.x no muestra `src/` como pestañas.
 
 ## Invariantes del diseño
 
@@ -117,10 +117,10 @@ configuración real de cada placa vive en la NVS.** Ningún otro fichero
 contiene pines, umbrales, intervalos, resoluciones ni límites: si hace falta
 un valor nuevo, se define en `config.h`.
 
-Lo que es propio de cada placa o despliegue **no se compila**: la WiFi y el
-host/puerto del Fog (E6) y, más adelante, la credencial (E7) y los parámetros
-de captura (E8) viven en la NVS, se graban por USB y llegarán desde la nube a
-través del Fog. Lo que `config.h` tenga para esos datos
+Lo que es propio de cada placa o despliegue **no se compila**: la WiFi, el
+host/puerto del Fog y la credencial viven en la NVS y se graban solo por
+USB; más adelante, los parámetros de captura (E8) también irán en la NVS y
+llegarán desde la nube a través del Fog. Lo que `config.h` tenga para esos datos
 (`FOG_SERVER_HOST_DEFAULT`, `FOG_SERVER_PORT_DEFAULT`, `CAM_FRAMESIZE_SNAPSHOT`…)
 es solo el **defecto** cuando la NVS no tiene valor: cambiarlo no afecta a una
 placa ya aprovisionada. Un defecto nunca puede ser un secreto (ni un SSID, ni
@@ -129,10 +129,9 @@ una contraseña, ni una IP de la red del proyecto).
 La NVS solo se toca desde `src/settings/settings_module.*` (ver
 "Aprovisionamiento").
 
-*Excepción provisional (hasta E7)*: `DEVICE_ID`, `API_KEY` y `API_TOKEN` siguen
-en `secrets.h`, que git ignora. `config.h` lo incluye con `__has_include`,
-lanza un `#error` claro si falta y anula (`#undef`) los antiguos
-`WIFI_SSID`/`WIFI_PASSWORD` si un `secrets.h` viejo aún los trae.
+No hay `secrets.h` ni ningún otro fichero de secretos que compilar: no
+volver a introducirlo. `.gitignore` sigue ignorando `secrets.h` solo para
+que una copia antigua con claves reales no acabe en un commit.
 
 **2. Sin librerías externas.** Solo el core ESP32 (`HTTPClient`,
 `Preferences`, cJSON).
@@ -206,10 +205,13 @@ GPIO0 (arranque en modo descarga).
 Contrato C del plan: una línea JSON por el puerto serie, una vez por placa.
 
 ```
-{"wifi":{"ssid":"…","password":"…"},"fogHost":"192.168.1.20","fogPort":8000}
+{"wifi":{"ssid":"…","password":"…"},"camera":{"id":"CAM-001","apiKey":"…","apiToken":"…"},"fogHost":"192.168.1.20","fogPort":8000}
 {"cmd":"erase"}        ← borra el namespace del proyecto y vuelve a pedir aprovisionar
 ```
 
+Se puede enviar con el script o pegarla en el monitor serie. Aprovisionada =
+`wifi` **y** `cred` en la NVS (`settings_is_provisioned()`); `wifi` y
+`camera` solo son obligatorios en la línea si la NVS no los tiene ya.
 Opcional: `"batteryCal":{"adcA":…,"batA":…,"adcB":…,"batB":…}` (mV en GPIO13
 y mV reales del pack, dos puntos). Al reaprovisionar puede ir sola.
 
@@ -221,29 +223,32 @@ salir aunque `DEBUG_ENABLED` sea 0): `PROV: READY …` (escuchando),
 
 | Situación | Qué hace | Coste |
 |---|---|---|
-| NVS sin WiFi | espera la línea `PROV_WAIT_MS` (60 s); si no llega, deep sleep `PROV_RETRY_SLEEP_MS` (1 h) | ~0,7 mAh/h en campo sin USB: estado de error, no puede esperar indefinidamente |
+| NVS sin WiFi o sin credencial | espera la línea `PROV_WAIT_MS` (60 s); si no llega, deep sleep `PROV_RETRY_SLEEP_MS` (1 h) | ~0,7 mAh/h en campo sin USB: estado de error, no puede esperar indefinidamente |
 | Aprovisionada y `ESP_RST_POWERON` (encendido, botón RST, pulso RTS) | ventana de `PROV_WINDOW_MS` (3 s) para reescribir o borrar | solo en arranques en frío |
 | Despertar de deep sleep, `ESP_RST_SW`, brownout, cuelgue | nada | los ciclos normales no pagan nada |
 
 **Validación** (en el firmware y también en el script): SSID de 1–32 bytes;
 contraseña WPA2 de 8–63 caracteres ASCII imprimibles (se rechazan las redes
 abiertas); `fogHost` solo letras, dígitos, `.` y `-` (así se atrapa el
-típico `http://…` o `…:8000`), hasta 63; `fogPort` entero 1–65535. Un campo
-desconocido es error (un `fog_host` mal escrito no se ignora en silencio). Se
-valida todo antes de escribir nada y se escribe el Fog **antes** que la WiFi:
-la WiFi es la que marca la placa como aprovisionada, así que un corte entre
-las dos escrituras deja la placa pidiendo aprovisionar de nuevo, no a medias.
+típico `http://…` o `…:8000`), hasta 63; `fogPort` entero 1–65535;
+`camera` con los tres campos: `id` 1–15 de letras, dígitos, `-` y `_`;
+`apiKey`/`apiToken` 1–63 ASCII imprimible sin espacios (van en cabeceras
+HTTP). Un campo desconocido es error (un `fog_host` mal escrito no se ignora
+en silencio). Se valida todo antes de escribir nada y se escribe la WiFi
+**la última** (Fog → calibración → credencial → WiFi): en una placa nueva la
+WiFi es la que completa el aprovisionamiento, así que un corte entre
+escrituras deja la placa pidiendo aprovisionar de nuevo, no a medias.
 `fogHost`/`fogPort` son opcionales: sin ellos se usan los defectos de
 `config.h`. `batteryCal`: los cuatro enteros, `adc*` ≤ 3300, `bat*` en
 2500–4500, B por encima de A en ≥ 300 mV de batería y ≥ 30 mV de ADC. La
-contraseña nunca sale por el serie.
+contraseña, la `apiKey` y el `apiToken` nunca salen por el serie (el `id` sí).
 
 **NVS** (`settings_module`, namespace `SETTINGS_NVS_NAMESPACE`): esquema
 completo desde E6 (WiFi, Fog, calibración, credencial, captura, `cfg_rev`,
 versión OTA rechazada); la tabla de claves está en `settings_module.h`. Cada
 grupo que se escribe junto es un blob (escritura atómica). Un cambio de
-`SETTINGS_SCHEMA_VERSION` borra el namespace **salvo** WiFi, Fog y
-calibración: ver "OTA y configuración por USB" antes de tocarlo. En un
+`SETTINGS_SCHEMA_VERSION` borra el namespace **salvo** WiFi, Fog,
+calibración y credencial: ver "OTA y configuración por USB" antes de tocarlo. En un
 ciclo normal solo se lee: no hay escrituras en flash por ciclo. `{"cmd":"erase"}` borra solo el namespace del proyecto, no
 la NVS del driver WiFi ni la calibración de radio (`WiFi.persistent(false)`:
 el driver no guarda copia del SSID/contraseña).
@@ -277,23 +282,24 @@ cámaras a la vez**.
 | `wifi` | `SettingsWifi` | 97 B |
 | `fog` | `SettingsFog` | 66 B |
 | `bat_cal` | `SettingsBatteryCal` | 8 B |
+| `cred` | `SettingsCredential` | 144 B |
 
-Lo demás (credencial E7, captura E8, `cfg_rev`, `ota_rej`) se puede volver a
-pedir al Fog: perderlo cuesta un ciclo, no un viaje.
+Lo demás (captura E8, `cfg_rev`, `ota_rej`) se puede volver a pedir al Fog:
+perderlo cuesta un ciclo, no un viaje.
 
 **Reglas:**
 
-1. **La WiFi y el host del Fog nunca llegan por red.** Ni la nube ni el Fog
+1. **La WiFi, el host del Fog y la credencial nunca llegan por red.** Ni la nube ni el Fog
    los envían, y el firmware no acepta cambiarlos por HTTP. Si alguien pide
    añadir `wifi` a `GET /camera/config` o "redes por nodo", recordar esta
    decisión antes de implementarlo (revisión 3 del plan).
-2. **No cambiar la forma de esos tres structs ni renombrar sus claves** (ni
+2. **No cambiar la forma de esos cuatro structs ni renombrar sus claves** (ni
    `schema`). Los `static_assert` de `settings_module.h` lo impiden al
    compilar; no quitarlos para que compile.
 3. **Dato nuevo = clave nueva**, con su defecto cuando no existe (como se
    hizo con `bat_cal`). Así `SETTINGS_SCHEMA_VERSION` se queda en 1.
 4. **Si de verdad hay que subir `SETTINGS_SCHEMA_VERSION`:**
-   `reset_keeping_usb_keys()` borra todo menos `wifi`, `fog` y `bat_cal`,
+   `reset_keeping_usb_keys()` borra todo menos `wifi`, `fog`, `bat_cal` y `cred`,
    clave a clave y con el esquema escrito al final (un corte a mitad se
    repite en el siguiente arranque). Nunca `clear()` del namespace en un
    cambio de esquema. Una clave nueva grabada por USB se añade a
@@ -368,8 +374,8 @@ proveedor), no esta documentación.
 - `camera` en **singular** y **sin id**: el Fog resuelve qué cámara es a
   partir de `X-API-Key`/`X-API-Token`. `/api/v1/cameras/<id>/frames` existe en
   el Fog, pero solo como `GET` de administración (un `POST` ahí da `405`).
-- `DEVICE_ID` no viaja en la petición: solo sale en el log de arranque para
-  saber qué unidad se ha flasheado.
+- El `camera.id` aprovisionado (`CAM-001`…) no viaja en la petición: solo
+  sale en la línea `NVS:` del arranque para saber qué unidad es.
 - Responde **`202 Accepted`** (la detección se procesa después de responder);
   el firmware trata cualquier 2xx como éxito.
 - Es HTTP plano (red local). Si el ESP32 no resuelve `.local` en estación,
@@ -390,14 +396,15 @@ aplicado.
 
 ## Seguridad
 
-Las credenciales están fuera del control de versiones: `secrets.h` (API, hasta
-E7) y `provision.local.json` (WiFi y host del Fog), ambos gitignored. La WiFi
-ya no está en el binario: se comprueba buscando el SSID de
-`provision.example.json` en `build/esp32cam.ino.bin`. **Nunca escribirlas en
-`config.h`, en el README ni en un mensaje de commit**, y no leer ni copiar
-`secrets.h` / `provision.local.json` desde una sesión de agente.
+Las credenciales están fuera del control de versiones: solo en
+`provision.local.json` (WiFi, credencial de la API y host del Fog),
+gitignored. Ni la WiFi ni la credencial están en el binario: se comprueba
+buscando el SSID y la `apiKey` en `build/esp32cam.ino.bin`. **Nunca
+escribirlas en `config.h`, en el README ni en un mensaje de commit**, y no
+leer ni copiar `provision.local.json` (ni un `secrets.h` antiguo que quede
+en disco) desde una sesión de agente.
 
-La NVS de la placa guarda la contraseña WiFi en claro (sin cifrado de NVS ni
+La NVS de la placa guarda la contraseña WiFi y el token de la API en claro (sin cifrado de NVS ni
 de flash): quien tenga la placa y un USB puede leerla. Es aceptable para el
 proyecto, pero conviene saberlo.
 
