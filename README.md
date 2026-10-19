@@ -203,8 +203,14 @@ Divisor **100 kΩ + 100 kΩ** desde VIN+ del MT3608 (la tensión de la celda)
 a GND; el punto medio va a **GPIO13**, con **100 nF** a GND. El divisor
 consume ~20 µA permanentes.
 
-**Relación.** En GPIO13 solo está el divisor; no hay nada más que desplace
-el nodo (comprobado en la placa real el 2026-10-13), así que `V13 = Vbat/2`:
+**Antes de montar el divisor: comprobar R8.** En el esquema AI-Thinker v1.6,
+R8 (47 kΩ) une IO13 (CD/DATA3 del slot SD) con 3V3. Unos lotes la montan y
+otros no (la CAM-002 la traía; la CAM-001, no). Con ella el nodo sube a
+`0,242·Vbat + 1,70 V` y la medida no sirve. Prueba: placa sin alimentar, sin
+divisor ni microSD, óhmetro entre IO13 y 3V3; si da ~43–47 kΩ, levantar un
+extremo de R8. No tocar R9, R10 ni R11 (IO15, IO2, IO4).
+
+**Relación.** Sin R8, en GPIO13 solo está el divisor, así que `V13 = Vbat/2`:
 
 | Vbat | 3,0 V | 3,3 V | 3,7 V | 4,2 V |
 |---|---|---|---|---|

@@ -197,10 +197,12 @@
  *  GPIO13 es ADC2: el WiFi se lo queda en cuanto arranca, asi que se lee
  *  ANTES de wifi_connect(). Al despertar del deep sleep la radio esta apagada.
  *
- *  En GPIO13 solo esta el divisor (sin pull-up que lo desplace: medido en
- *  la placa real, 2026-10-13), asi que V13 = Vbat/2: 1500 mV con 3,0 V y
+ *  Con solo el divisor en GPIO13, V13 = Vbat/2: 1500 mV con 3,0 V y
  *  2100 mV con 4,2 V. Todo el rango cae por debajo de ~2450 mV, donde el
  *  ADC a 12 dB es lineal, y 1 mV de error en el ADC son 2 mV de bateria.
+ *  Requiere que la placa NO tenga montada R8 (47k de IO13 a 3V3, pull-up
+ *  del slot SD): algunos lotes la traen y la medida no se puede corregir
+ *  calibrando. Ver "Hardware" en CLAUDE.md.
  *
  *  Aun asi se calibra con DOS puntos y no con "x2": el ADC del ESP32 tiene
  *  error de ganancia y de offset propios de cada chip (decenas de mV aun con

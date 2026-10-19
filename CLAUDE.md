@@ -190,12 +190,21 @@ cámara) y `GPIO22 = PCLK`. El OV2640 ocupa:
 Divisor 100k/100k desde VIN+ del MT3608 a GPIO13, 100 nF a GND (se quitó el
 ADS1115 y las pilas AA). El ADC2 **sí** sirve si se lee antes de
 `wifi_connect()`: lo que no funciona es leerlo con el WiFi encendido.
-En GPIO13 solo está el divisor: `V13 = Vbat/2` (1,50–2,10 V, zona lineal del
-ADC a 12 dB). Un handoff anterior suponía un pull-up de 47k en la placa que
-llevaba a `0,242·Vbat + 1,70 V`; medido en la placa real el 2026-10-13, no
-es así (con aquellos defectos una celda de ~3,9 V salía como 1,06 V). Se
-calibra igual con dos puntos por el error de ganancia/offset del ADC de cada
-chip; va en la NVS (`batteryCal`).
+Con solo el divisor, `V13 = Vbat/2` (1,50–2,10 V, zona lineal del ADC a
+12 dB). Se calibra igual con dos puntos por el error de ganancia/offset del
+ADC de cada chip; va en la NVS (`batteryCal`).
+
+**R8 (47K, IO13 → 3V3) depende del lote: comprobarla en cada placa.** En el
+esquema AI-Thinker v1.6 las líneas del slot SD llevan pull-ups a 3V3: R8
+en IO13 (CD/DATA3), R9 en IO15, R10 en IO2, R11 en IO4 (todas 47K) y R7 en
+IO12 sin montar. Unos clones montan R8 y otros no: la CAM-001 leía bien y
+la CAM-002 la traía (2026-10-18). Con R8, `V13 = 0,242·Vbat + 1,70 V`
+(2,4–2,7 V, fuera de la zona lineal; la página daba 5,33 V con una celda de
+3,97 V) y no se puede calibrar bien: 170–600 mV de rango y la lectura sigue
+al rail de 3,3 V. Prueba antes de montar: placa sin alimentar, sin divisor
+ni microSD, óhmetro entre IO13 y 3V3; ~43–47 kΩ = R8 montada. Arreglo:
+levantar un extremo de R8 (comprobar que no pita con IO2/4/15: R9–R11 no se
+tocan) y verificar `V13 ≈ Vbat/2` con el divisor puesto.
 
 **No hay microSD, ni siquiera en modo 1 bit.** En modo 1 bit la SD solo usa
 GPIO14/15/2, pero la pista D3 del slot sigue unida a GPIO13, y toda
