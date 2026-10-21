@@ -116,6 +116,7 @@ static uint32_t build_id() {
  * ==========================================================================*/
 static void go_to_sleep(uint32_t sleep_ms = CAPTURE_INTERVAL_MS) {
   camera_power_down();   // PWDN + rtc_gpio_hold_en: retiene el pin dormido
+  camera_flash_hold_off();   // IO4 en LOW: el pull-up R11 encenderia el flash a medias
   wifi_off();
 
 #if STATUS_LED_ENABLED
@@ -416,6 +417,11 @@ void setup() {
      * ROM ni el bootloader (unos cientos de ms) ni el propio POST: es una
      * cota inferior, comparable entre ciclos, no el consumo exacto. */
     t.awake_ms         = millis();
+
+    /* La foto ya esta en PSRAM: el sensor no hace falta durante el POST
+     * (~40-60 mA menos). store_frame() y send_backlog() lo encuentran ya
+     * apagado; mientras la camara siga lista, nada lo vuelve a encender. */
+    camera_power_down();
 
     char date[40];
     const int code = upload_frame(fog.host, fog.port, cred.api_key, cred.api_token,

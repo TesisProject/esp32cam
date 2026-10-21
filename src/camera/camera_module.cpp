@@ -105,6 +105,7 @@ bool camera_init() {
   apply_sensor_defaults();
 
   if (CAM_FLASH_ENABLED) {
+    rtc_gpio_hold_dis((gpio_num_t)CAM_PIN_FLASH_LED);   // retenido por camera_flash_hold_off()
     pinMode(CAM_PIN_FLASH_LED, OUTPUT);
     digitalWrite(CAM_PIN_FLASH_LED, LOW);
   }
@@ -148,10 +149,24 @@ void camera_release(camera_fb_t *fb) {
  * -------------------------------------------------------------------------*/
 void camera_flash(bool on) {
 #if CAM_FLASH_ENABLED
+  rtc_gpio_hold_dis((gpio_num_t)CAM_PIN_FLASH_LED);
   digitalWrite(CAM_PIN_FLASH_LED, on ? HIGH : LOW);
 #else
   (void)on;
 #endif
+}
+
+void camera_flash_hold_off() {
+  /* R11 (47k, pull-up del slot SD) tira de IO4 hacia 3V3 cuando el pin queda
+   * como entrada, y eso basta para que el transistor del flash conduzca a
+   * medias: el LED brilla flojo (varios mA) durante todo el deep sleep.
+   * GPIO4 es RTC-capable: igual que PWDN, se fuerza LOW y se retiene. El
+   * hold sobrevive a los despertares, asi que tambien cubre el ciclo
+   * despierto; solo camera_flash() y camera_init() lo sueltan. */
+  rtc_gpio_hold_dis((gpio_num_t)CAM_PIN_FLASH_LED);
+  pinMode(CAM_PIN_FLASH_LED, OUTPUT);
+  digitalWrite(CAM_PIN_FLASH_LED, LOW);
+  rtc_gpio_hold_en((gpio_num_t)CAM_PIN_FLASH_LED);
 }
 
 /* ---------------------------------------------------------------------------

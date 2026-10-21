@@ -31,7 +31,7 @@
  * una mayor que la mia?") sin parsear cadenas tipo "1.4.0". Viaja al Fog
  * como fw_version en cada POST y sale en el log de arranque.
  * SUBIRLO antes de compilar cualquier binario que vaya a otra placa. */
-#define FW_VERSION             3
+#define FW_VERSION             4
 
 /* ===========================================================================
  * 2. WIFI  (solo modo estacion: un AP propio impediria dormir la radio)

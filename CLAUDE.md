@@ -226,6 +226,14 @@ la CPU pero **no** corta la alimentación de la cámara (comparte el rail de
 siguiente `camera_init()` debe soltar el hold con `rtc_gpio_hold_dis()` antes
 de reconfigurar el pin, o `pinMode`/`digitalWrite` no tienen efecto.
 
+**GPIO4 (flash) también se retiene en LOW** (desde `FW_VERSION` 4). R11
+(47K a 3V3) tira de IO4 hacia arriba cuando el pin queda como entrada, y el
+transistor del flash conduce a medias: el LED brilla flojo durante todo el
+deep sleep. `camera_flash_hold_off()` lo pone en LOW con
+`rtc_gpio_hold_en()` en `go_to_sleep()`; el hold sobrevive a los despertares
+y solo lo sueltan `camera_flash()` y `camera_init()` (con
+`CAM_FLASH_ENABLED`). Sin medir aún cuánto ahorra en hardware.
+
 **Monitor serie con `arduino-cli`: `dtr=off,rts=off`.** Por defecto los deja
 activos y en la ESP32-CAM-MB RTS va a EN (placa en reset permanente) y DTR a
 GPIO0 (arranque en modo descarga).
@@ -362,7 +370,8 @@ que servir entre ciclos.
 
 - Cada ciclo: NVS (WiFi, Fog, calibración) → batería → cámara → WiFi STA →
   capturar → POST → (si 2xx: hora del Fog y hasta 3 fotos atrasadas; si no:
-  guardar la foto) → apagar cámara (PWDN + hold) → WiFi off →
+  guardar la foto) → apagar cámara (PWDN + hold; el sensor ya se apaga
+  antes del POST) → flash en LOW + hold → WiFi off →
   `esp_deep_sleep_start()`.
 - Corte por batería baja: por debajo de `BATTERY_CUTOFF_MV` (3,3 V) se duerme
   sin encender cámara ni WiFi, y no se vuelve a transmitir hasta superar

@@ -97,7 +97,8 @@ principio a fin y termina en `esp_deep_sleep_start()`, que no retorna.
 5. Si la subida fue bien: poner el reloj en hora con la cabecera `Date` de
    la respuesta y subir hasta 3 fotos atrasadas. Si no (sin WiFi, error de
    red o 5xx): guardar la foto en la flash interna.
-6. Apagar la cámara (PWDN + `rtc_gpio_hold_en`), apagar WiFi, dormir
+6. Apagar la cámara (PWDN + `rtc_gpio_hold_en`; el sensor ya se apaga antes
+   del POST), dejar el flash (GPIO4) en LOW retenido, apagar WiFi, dormir
    `CAPTURE_INTERVAL_MS` y repetir.
 
 Si falla la cámara o el WiFi, el ciclo se aborta y el dispositivo duerme
@@ -196,6 +197,12 @@ PWDN (GPIO32) en alto para apagar el sensor y usa `rtc_gpio_hold_en()` para
 que ese nivel se mantenga durante todo el deep sleep (GPIO32 es RTC-capable).
 Al despertar, `camera_init()` suelta el hold con `rtc_gpio_hold_dis()` antes
 de reconfigurar el pin.
+
+Lo mismo con el **flash (GPIO4)**: R11 (47 kΩ a 3V3, pull-up del slot SD)
+lo deja encendido a medias si el pin queda como entrada, y el LED brilla
+flojo toda la noche. Desde `FW_VERSION` 4, `go_to_sleep()` lo pone en LOW y
+lo retiene con `rtc_gpio_hold_en()`. Prueba: a oscuras, con la placa
+dormida, el LED grande no debe verse encendido.
 
 ### 4.3 Medida de la batería (GPIO13)
 

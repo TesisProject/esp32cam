@@ -23,6 +23,10 @@ void camera_release(camera_fb_t *fb);
 /* Control del LED flash blanco (GPIO4). No hace nada si CAM_FLASH_ENABLED=0. */
 void camera_flash(bool on);
 
+/* Flash en LOW y retenido (rtc_gpio_hold_en) para el deep sleep: sin esto,
+ * el pull-up R11 lo deja encendido a medias. Siempre, haya flash o no. */
+void camera_flash_hold_off();
+
 /* Ahorro de energia: corta/restaura la alimentacion del sensor por PWDN.
  * camera_capture() despierta el sensor automaticamente si hiciera falta. */
 void camera_power_down();
