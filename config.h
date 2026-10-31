@@ -31,7 +31,7 @@
  * una mayor que la mia?") sin parsear cadenas tipo "1.4.0". Viaja al Fog
  * como fw_version en cada POST y sale en el log de arranque.
  * SUBIRLO antes de compilar cualquier binario que vaya a otra placa. */
-#define FW_VERSION             4
+#define FW_VERSION             5
 
 /* ===========================================================================
  * 2. WIFI  (solo modo estacion: un AP propio impediria dormir la radio)
@@ -103,9 +103,10 @@
 // Si el ESP32 no logra resolver ".local" en estacion, aprovisionar la placa
 // con la IP de la Pi en fogHost (p. ej. "192.168.1.20").
 
-/* 5 min en campo. Bajarlo a 30000 solo en el banco: a 30 s el ciclo activo
- * pasa a dominar y el consumo medio se multiplica por ~3-4 (README, seccion 5). */
-#define CAPTURE_INTERVAL_MS     300000UL   // 5 minutos entre capturas (deep sleep)
+/* 5 min (300000) en campo. A 30 s el ciclo activo pasa a dominar y el consumo
+ * medio se multiplica por ~3-4 (README, seccion 5): devolverlo a 300000 antes
+ * de dejar la camara desatendida con bateria. */
+#define CAPTURE_INTERVAL_MS     30000UL    // 30 s entre capturas (deep sleep)
 
 /* ===========================================================================
  * 4. LED DE ESTADO  -  rojo integrado en GPIO33
@@ -373,7 +374,10 @@
  * ==========================================================================*/
 #define OTA_ENABLED                1
 #define OTA_HARDWARE_ID            "esp32cam-aithinker"
-#define OTA_CHECK_EVERY_CYCLES     12          // 12 x 5 min = una vez por hora
+/* Derivado del intervalo para que siga siendo una vez por hora (12 ciclos a
+ * 5 min, 120 a 30 s): fijo en 12, a 30 s seria un GET cada 6 min. */
+#define OTA_CHECK_EVERY_CYCLES     ((uint32_t)(3600000UL / CAPTURE_INTERVAL_MS))
+static_assert(OTA_CHECK_EVERY_CYCLES >= 1, "CAPTURE_INTERVAL_MS no puede pasar de 1 h");
 /* Descargar y escribir 1,2 MB son ~10-20 s con la radio encendida. Con la
  * celda baja un brownout a media escritura no rompe nada (la ranura nueva no
  * se activa hasta el final), pero gasta la descarga entera. Sin medida
