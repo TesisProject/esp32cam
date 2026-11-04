@@ -103,9 +103,12 @@
 // Si el ESP32 no logra resolver ".local" en estacion, aprovisionar la placa
 // con la IP de la Pi en fogHost (p. ej. "192.168.1.20").
 
-/* 5 min (300000) en campo. A 30 s el ciclo activo pasa a dominar y el consumo
- * medio se multiplica por ~3-4 (README, seccion 5): devolverlo a 300000 antes
- * de dejar la camara desatendida con bateria. */
+/* 30 s por decision de diseno (HU-08: la disponibilidad se refresca cada 30 s,
+ * asi que la camara tambien captura cada 30 s). Coste: a 30 s el ciclo activo
+ * pasa a dominar y el consumo medio es ~3-4 veces el de 5 min (README, seccion
+ * 5: ~1,5-3 dias con 1 celda, ~6-12 dias con 4 en paralelo). Con bateria, para
+ * mas autonomia, alimentacion externa o mas celdas; subir el intervalo deja de
+ * cumplir HU-08. */
 #define CAPTURE_INTERVAL_MS     30000UL    // 30 s entre capturas (deep sleep)
 
 /* ===========================================================================
@@ -326,7 +329,9 @@
  *
  *  Capacidad: LittleFS asigna bloques enteros de 4 KB. Una foto de 30 KB
  *  ocupa 8, una de 40 KB 10 y una de 70 KB 18, y quedan ~27 bloques libres:
- *  caben 1-3 fotos = 5-15 min de corte. Lleno, se descarta la mas antigua.
+ *  caben 1-3 fotos = ~30-90 s de corte a una captura cada 30 s (una foto por
+ *  ciclo fallido). Lleno, se descarta la mas antigua: un corte mas largo solo
+ *  conserva las 1-3 ultimas fotos.
  *
  *  El reloj: el ESP32 no tiene RTC con pila. Se pone en hora con la cabecera
  *  Date de cada 2xx del Fog y sigue contando en deep sleep (oscilador RC

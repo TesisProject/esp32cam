@@ -385,8 +385,8 @@ que servir entre ciclos.
   indefinidamente, gasta batería con pilas).
 - Solo modo estación: un AP propio obligaría a emitir balizas sin parar y la
   radio no podría dormir nunca.
-- `CAPTURE_INTERVAL_MS` en `config.h` (5 min en campo; bajarlo a 30 s solo
-  para pruebas, y devolverlo antes de dejar la cámara desatendida).
+- `CAPTURE_INTERVAL_MS` en `config.h`: 30 s por diseño (HU-08, la app refresca
+  cada 30 s). Subirlo alarga la batería pero deja de cumplir HU-08.
 
 ## Cliente OTA (E5)
 
@@ -442,7 +442,7 @@ guarda en la partición `spiffs` de Minimal SPIFFS (`0x3D0000`, 128 KB) con
 LittleFS, y se sube en el siguiente ciclo con conexión. Contrato con el Fog
 y la nube, y sus cambios: `docs/handoff-buffer-fotos-offline.md`.
 
-- **Capacidad: 1–3 fotos, 5–15 min de corte.** LittleFS asigna bloques de
+- **Capacidad: 1–3 fotos, ~30–90 s de corte a 30 s por captura.** LittleFS asigna bloques de
   4 KB: una foto de 30 KB ocupa 8, una de 40 KB 10 y una de 70 KB 18, y
   quedan ~27 libres. Si se llena, se descarta la más antigua.
 - **Orden de subida:** primero la foto actual (sin `captured_at`); si da 2xx,

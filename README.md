@@ -31,9 +31,9 @@ la API y el host del Fog de cada una se graban por USB en su NVS (§6.6).
 |---|---|
 | Pack de batería | **una celda 18650 Li-ion (1S, 3,0–4,2 V)** → TP4056 → MT3608 a 5 V; tensión medida por GPIO13 (§4.3) |
 | microSD | **No se usa**: su D3 está unido a GPIO13 y falsearía la batería (§3) |
-| Fotos no subidas | Se guardan en la **flash interna** (LittleFS, 128 KB): 1–3 fotos, 5–15 min de corte (§2) |
+| Fotos no subidas | Se guardan en la **flash interna** (LittleFS, 128 KB): 1–3 fotos, ~30–90 s de corte (§2) |
 | Red | **Solo estación** — necesita el router para llegar a la Pi; el modo AP impide dormir |
-| Intervalo de captura | **5 minutos** (`CAPTURE_INTERVAL_MS`), deep sleep entre medio |
+| Intervalo de captura | **30 segundos** (`CAPTURE_INTERVAL_MS`, decisión de HU-08), deep sleep entre medio |
 | Subida | `POST` multipart a `http://<fogHost>:<fogPort>/api/v1/camera/frames` (sin id: el Fog identifica la cámara por `X-API-Key`/`X-API-Token`); responde `202 Accepted` |
 
 Las constantes y los valores por defecto viven en `config.h`. Lo propio de
@@ -112,7 +112,7 @@ flash interna (128 KB, LittleFS) y se sube en el siguiente ciclo con
 conexión, **después** de la foto actual, con su hora de captura en
 `captured_at`.
 
-- **Capacidad:** 1–3 fotos (30–70 KB cada una), es decir, 5–15 min de corte.
+- **Capacidad:** 1–3 fotos (30–70 KB cada una), es decir, ~30–90 s de corte a una captura cada 30 s (en un corte más largo solo quedan las últimas).
   Si se llena, se descarta la más antigua. Cubre reinicios del router o del
   Fog, no cortes largos.
 - **Hora:** el ESP32 no tiene reloj con pila. La toma de la cabecera `Date`
@@ -305,10 +305,10 @@ con un temporizador externo tipo TPL5110).
 
 Consumo medio estimado: **~9–17 mAh por hora (~220–400 mAh/día)**.
 
-| Batería (18650 de ~2500 mAh, ~90 % útil hasta el corte de 3,3 V) | A 5 min | A 30 s (pruebas) |
+| Batería (18650 de ~2500 mAh, ~90 % útil hasta el corte de 3,3 V) | A 30 s (HU-08, valor actual) | A 5 min (referencia) |
 |---|---|---|
-| 1 celda (1S1P) | ~5–10 días | ~1,5–3 días |
-| 4 celdas en paralelo (1S4P) | ~3–6 semanas | ~6–12 días |
+| 1 celda (1S1P) | ~1,5–3 días | ~5–10 días |
+| 4 celdas en paralelo (1S4P) | ~6–12 días | ~3–6 semanas |
 
 **Varias celdas: siempre en paralelo.** El firmware no cambia: la tensión
 sigue siendo la de una celda (3,0–4,2 V), así que el divisor, la
@@ -319,9 +319,10 @@ En serie no: 4S son 12–16,8 V, el TP4056 solo carga 1S, el MT3608 solo
 eleva tensión y el divisor pondría 6–8,4 V en GPIO13 (el máximo es 3,6 V).
 Con 4 celdas el TP4056 (1 A) tarda ~10–12 h en una carga completa.
 
-**Para pruebas de campo**: bajar `CAPTURE_INTERVAL_MS` a 30000 (30 s) para no
-esperar 5 minutos entre cada verificación, y devolverlo a 300000 antes de
-dejar la cámara desatendida con batería.
+**Intervalo de 30 s (HU-08)**: es el valor de diseño, no solo de pruebas: la
+app refresca la ocupación cada 30 s. Su costo es la autonomía de la tabla
+anterior; para más días hace falta alimentación externa o más celdas.
+Subir `CAPTURE_INTERVAL_MS` alarga la batería pero deja de cumplir HU-08.
 
 ---
 
@@ -536,7 +537,6 @@ igual que con el script, pero sin los avisos de «valor de la plantilla».
 | Quiero… | Toca |
 |---|---|
 | Más autonomía / menos tráfico | subir `CAPTURE_INTERVAL_MS` |
-| Probar sin esperar 5 min | bajar `CAPTURE_INTERVAL_MS` a 30000 (volver a subirlo después) |
 | Imagen más nítida | `CAM_JPEG_QUALITY_SNAPSHOT 10`, `CAM_FRAMESIZE_SNAPSHOT FRAMESIZE_UXGA` |
 | Cámara del revés | `CAM_VFLIP 1` y/o `CAM_HMIRROR 1` |
 | IP siempre la misma | `WIFI_USE_STATIC_IP 1` + los cuatro `WIFI_STATIC_*` |
