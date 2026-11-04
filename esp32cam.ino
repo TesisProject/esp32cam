@@ -20,10 +20,16 @@
  *       y subir hasta BACKLOG_MAX_SEND_PER_CYCLE fotos atrasadas.
  *       Si no (sin WiFi, Fog caido, 5xx): guardar la foto en la flash
  *       interna para subirla en un ciclo con conexion (src/backlog/).
- *    6. Cada OTA_CHECK_EVERY_CYCLES ciclos con subida correcta, pedir la
- *       config al Fog y, si ofrece una version nueva con firma valida,
- *       instalarla y reiniciar (src/ota/).
+ *    6. Cada CONFIG_CHECK_EVERY_CYCLES ciclos con subida correcta (o en
+ *       cuanto el Fog responde 403), pedir la config al Fog: si la camara
+ *       esta desactivada en la nube, apuntarlo en la NVS y dormir. Cada
+ *       OTA_CHECK_EVERY_CYCLES, si esa config ofrece una version nueva con
+ *       firma valida, instalarla y reiniciar (src/ota/).
  *    7. Apagar camara (PWDN + hold) y WiFi, y dormir CAPTURE_INTERVAL_MS.
+ *
+ *  Camara desactivada (NVS cam_off, HU-23): tras la bateria, sin encender el
+ *  sensor, solo WiFi + GET de la config. Si sigue desactivada, duerme
+ *  DISABLED_SLEEP_MS; si ya no, lo apunta y vuelve enseguida al ciclo normal.
  *
  *  Sin WiFi la foto se captura DESPUES del intento de conexion, igual que en
  *  un ciclo normal: esos segundos son los que dan tiempo al AEC/AGC del
@@ -89,9 +95,14 @@ RTC_DATA_ATTR static uint32_t s_wifi_fail_streak = 0;
 RTC_DATA_ATTR static bool s_battery_low = false;
 
 /* Ciclos con subida correcta que faltan para volver a pedir la config al
- * Fog (oferta de firmware). 0 = en el proximo: tras un arranque en frio se
- * pregunta enseguida. */
+ * Fog (enabled y oferta de firmware). 0 = en el proximo: tras un arranque en
+ * frio se pregunta enseguida. */
 RTC_DATA_ATTR static uint32_t s_config_countdown = 0;
+
+/* Lecturas de la config que faltan para volver a mirar su oferta de firmware.
+ * Va aparte de s_config_countdown: la config se lee cada 10 ciclos, la OTA se
+ * sigue mirando una vez por hora. */
+RTC_DATA_ATTR static uint32_t s_ota_countdown = 0;
 
 /* Descargas de firmware fallidas seguidas: marca la espera hasta reintentar
  * (1, 2, 4, 8 ciclos y despues la normal). Un corte puntual se recupera en
@@ -217,20 +228,65 @@ static void send_backlog(const SettingsFog &fog, const SettingsCredential &cred,
   LOG("BACKLOG: quedan %lu pendientes", (unsigned long)backlog_pending());
 }
 
-/* Tras una subida 2xx, cada OTA_CHECK_EVERY_CYCLES ciclos: config del Fog y,
- * si trae una version nueva, ota_handle_offer() (que reinicia si instala).
- * Va despues de las fotos atrasadas: un OTA reinicia y las dejaria sin subir. */
-static void check_firmware(const SettingsFog &fog, const SettingsCredential &cred,
-                           const BatteryReading &bat) {
-  if (!OTA_ENABLED) return;
-  if (s_config_countdown > 0) {
-    s_config_countdown--;
-    return;
+/* Aplica el "enabled" de la config. Devuelve true si la camara queda
+ * habilitada. Solo escribe la NVS si cambia. */
+static bool apply_enabled(const FogConfig &cfg) {
+  const bool enabled = !cfg.has_enabled || cfg.enabled;
+  if (enabled != settings_camera_enabled()) {
+    LOG("CONFIG: la camara pasa a %s en la nube", enabled ? "HABILITADA" : "DESHABILITADA");
+    settings_set_camera_enabled(enabled);
   }
-  s_config_countdown = OTA_CHECK_EVERY_CYCLES - 1;
+  return enabled;
+}
+
+/* Ciclo de una camara desactivada: sin sensor, solo WiFi + config. No vuelve
+ * nunca: duerme DISABLED_SLEEP_MS o, si la reactivaron, un instante para
+ * empezar ya un ciclo normal (desde cero: camara, WiFi y captura). */
+static void disabled_cycle(const SettingsWifi &wifi, const SettingsFog &fog,
+                           const SettingsCredential &cred) {
+  LOG("CONFIG: camara deshabilitada en la nube: no se captura, solo se relee la config");
+  const bool connected = wifi_connect(wifi.ssid, wifi.password);
+  if (!connected) go_to_sleep(DISABLED_SLEEP_MS);
+  FogConfig cfg;
+  if (fogconfig_fetch(fog.host, fog.port, cred.api_key, cred.api_token, cfg) && apply_enabled(cfg)) {
+    s_config_countdown = 0;   // en el ciclo normal se vuelve a mirar la oferta de firmware
+    go_to_sleep(1000);
+  }
+  /* Sin respuesta (Fog caido, 401...) se sigue desactivada: la credencial
+   * revocada la detecta el ciclo normal, al que se vuelve al reactivarla. */
+  go_to_sleep(DISABLED_SLEEP_MS);
+}
+
+/* Tras una subida 2xx, cada CONFIG_CHECK_EVERY_CYCLES ciclos (o ya, con
+ * force: el Fog respondio 403): config del Fog. Si la camara quedo
+ * desactivada, duerme DISABLED_SLEEP_MS (no vuelve). Si no, cada
+ * OTA_CHECK_EVERY_CYCLES ciclos mira su oferta de firmware y, si trae una
+ * version nueva, ota_handle_offer() (que reinicia si instala). Va despues de
+ * las fotos atrasadas: un OTA reinicia y las dejaria sin subir. */
+static void check_config(const SettingsFog &fog, const SettingsCredential &cred,
+                         const BatteryReading &bat, bool force) {
+  if (!force) {
+    if (s_config_countdown > 0) {
+      s_config_countdown--;
+      return;
+    }
+    s_config_countdown = CONFIG_CHECK_EVERY_CYCLES - 1;
+  }
 
   FogConfig cfg;
   if (!fogconfig_fetch(fog.host, fog.port, cred.api_key, cred.api_token, cfg)) return;
+  if (!apply_enabled(cfg)) go_to_sleep(DISABLED_SLEEP_MS);
+  if (force) return;   // tras un 403 que no era por estar deshabilitada: nada mas que hacer
+
+  if (!OTA_ENABLED) return;
+  /* Una lectura de config cada CONFIG_CHECK_EVERY_CYCLES ciclos: la oferta se
+   * mira cada OTA_CHECK_EVERY_CYCLES ciclos (redondeado hacia arriba). */
+  if (s_ota_countdown > 0) {
+    s_ota_countdown--;
+    return;
+  }
+  s_ota_countdown = (OTA_CHECK_EVERY_CYCLES + CONFIG_CHECK_EVERY_CYCLES - 1) / CONFIG_CHECK_EVERY_CYCLES - 1;
+
   if (!cfg.has_firmware) {
     LOG("OTA: el Fog no tiene firmware asignado a esta camara");
     return;
@@ -245,7 +301,9 @@ static void check_firmware(const SettingsFog &fog, const SettingsCredential &cre
     s_ota_fail_streak++;
     const uint32_t shift = s_ota_fail_streak - 1 < 3 ? s_ota_fail_streak - 1 : 3;
     const uint32_t wait  = min((uint32_t)1 << shift, (uint32_t)OTA_CHECK_EVERY_CYCLES);
+    /* Reintento en `wait` ciclos: config y oferta, las dos ya. */
     s_config_countdown = wait - 1;
+    s_ota_countdown    = 0;
     LOG("OTA: fallo %lu seguido, se reintenta en %lu ciclos", (unsigned long)s_ota_fail_streak,
         (unsigned long)wait);
   } else {
@@ -287,6 +345,7 @@ void setup() {
     s_wifi_fail_streak = 0;
     s_battery_low      = false;
     s_config_countdown = 0;
+    s_ota_countdown    = 0;
     s_ota_fail_streak  = 0;
   }
   LOG("Reset reason: %d  wake_count=%lu  wifi_fail_streak=%lu",
@@ -365,6 +424,11 @@ void setup() {
     s_battery_low = false;
   }
 
+  /* --- Camara desactivada en la nube (HU-23) ----------------------------------
+   * Despues de la bateria (con la celda baja ni siquiera se conecta) y antes
+   * de encender el sensor: un ciclo deshabilitado no lo necesita. */
+  if (!settings_camera_enabled()) disabled_cycle(wifi, fog, cred);   // no vuelve
+
   /* --- Camara --------------------------------------------------------------*/
   if (!camera_init()) {
     LOG("FATAL: la camara no arranca. Se aborta el ciclo y se duerme igual.");
@@ -436,6 +500,13 @@ void setup() {
        * ota_module.cpp). Por eso NO se valida al arrancar ni al conectar:
        * una version que conecta pero no sabe subir tambien debe caer. */
       ota_confirm_if_pending();
+    } else if (code == 403) {
+      /* El Fog responde 403 a una camara deshabilitada: se relee la config ya
+       * (no en 10 ciclos) para dejar de capturar. Tampoco se guarda la foto. */
+      LOG("UPLOAD: 403, se relee la config por si la camara esta deshabilitada");
+      camera_release(fb);
+      check_config(fog, cred, bat, true);   // si esta deshabilitada, no vuelve
+      go_to_sleep();
     } else if (code > 0 && code < 500) {
       /* 4xx: credencial mala, foto rechazada... Reintentarla mas tarde daria
        * lo mismo: no se guarda. */
@@ -447,7 +518,7 @@ void setup() {
     camera_release(fb);
     if (uploaded) {
       send_backlog(fog, cred, date);
-      check_firmware(fog, cred, bat);
+      check_config(fog, cred, bat, false);
     }
   }
 

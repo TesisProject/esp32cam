@@ -31,7 +31,7 @@
  * una mayor que la mia?") sin parsear cadenas tipo "1.4.0". Viaja al Fog
  * como fw_version en cada POST y sale en el log de arranque.
  * SUBIRLO antes de compilar cualquier binario que vaya a otra placa. */
-#define FW_VERSION             5
+#define FW_VERSION             6
 
 /* ===========================================================================
  * 2. WIFI  (solo modo estacion: un AP propio impediria dormir la radio)
@@ -110,6 +110,21 @@
  * mas autonomia, alimentacion externa o mas celdas; subir el intervalo deja de
  * cumplir HU-08. */
 #define CAPTURE_INTERVAL_MS     30000UL    // 30 s entre capturas (deep sleep)
+
+/* Camara desactivada en la nube (HU-23, "enabled": false en la config del
+ * Fog): no enciende el sensor ni captura; cada DISABLED_SLEEP_MS despierta,
+ * conecta, relee la config y vuelve a dormir. Al reactivarla, vuelve a
+ * capturar en el ciclo siguiente a leer "enabled": true, o sea como mucho
+ * DISABLED_SLEEP_MS + 1 min de sync del Fog. 2 min: un ciclo deshabilitado
+ * cuesta solo WiFi + 1 GET (~2-3 s despierta), asi que la celda dura varias
+ * veces mas que capturando cada 30 s, y reactivarla sigue tardando poco. */
+#define DISABLED_SLEEP_MS       120000UL
+
+/* Cada cuantos ciclos con subida correcta se relee la config del Fog para
+ * saber si sigue habilitada (aparte, y mas a menudo, que la oferta de OTA).
+ * 10 = 5 min a 30 s. Desactivarla igual se nota en el siguiente ciclo: el
+ * Fog responde 403 a la subida y eso fuerza a releer la config ya. */
+#define CONFIG_CHECK_EVERY_CYCLES  10
 
 /* ===========================================================================
  * 4. LED DE ESTADO  -  rojo integrado en GPIO33
@@ -380,7 +395,9 @@
 #define OTA_ENABLED                1
 #define OTA_HARDWARE_ID            "esp32cam-aithinker"
 /* Derivado del intervalo para que siga siendo una vez por hora (12 ciclos a
- * 5 min, 120 a 30 s): fijo en 12, a 30 s seria un GET cada 6 min. */
+ * 5 min, 120 a 30 s): fijo en 12, a 30 s seria un GET cada 6 min. Solo marca
+ * cuando se mira la oferta de firmware: la config (enabled) se lee cada
+ * CONFIG_CHECK_EVERY_CYCLES, y la oferta sale de esa misma respuesta. */
 #define OTA_CHECK_EVERY_CYCLES     ((uint32_t)(3600000UL / CAPTURE_INTERVAL_MS))
 static_assert(OTA_CHECK_EVERY_CYCLES >= 1, "CAPTURE_INTERVAL_MS no puede pasar de 1 h");
 /* Descargar y escribir 1,2 MB son ~10-20 s con la radio encendida. Con la

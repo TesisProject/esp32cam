@@ -90,6 +90,10 @@ bool fogconfig_fetch(const char *fog_host, uint16_t fog_port,
     return false;
   }
 
+  const cJSON *en = cJSON_GetObjectItemCaseSensitive(root, "enabled");
+  out.has_enabled = cJSON_IsBool(en);
+  out.enabled     = out.has_enabled ? cJSON_IsTrue(en) : true;
+
   const cJSON *fw = cJSON_GetObjectItemCaseSensitive(root, "firmware");
   if (fw && !cJSON_IsNull(fw)) {
     out.has_firmware = cJSON_IsObject(fw) && parse_firmware(fw, out.firmware);

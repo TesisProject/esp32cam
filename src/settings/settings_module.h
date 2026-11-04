@@ -17,6 +17,7 @@
  *    cfg_rev     u32    ultima revision de config aplicada         E8
  *    ota_rej     u32    version OTA rechazada por rollback         E5
  *    bat_cal     blob   calibracion del divisor de bateria, CONG.  bateria
+ *    cam_off     u8     1 = desactivada en la nube (HU-23)          iter2
  *
  *  wifi, fog, bat_cal y cred (CONG. = congelados) solo se graban por USB y
  *  ningun cambio de esquema los borra (ver reset_keeping_usb_keys() en el
@@ -125,6 +126,13 @@ bool     settings_get_capture(SettingsCapture &out);
 bool     settings_set_capture(const SettingsCapture &cap);
 uint32_t settings_config_revision();       // 0 = nunca aplicada
 bool     settings_set_config_revision(uint32_t revision);
+
+/* --- Camara habilitada (HU-23) ---------------------------------------------
+ * Ultimo "enabled" que dio el Fog. Sin la clave (placa nueva, o un cambio de
+ * esquema la borro) = habilitada: el peor caso es un ciclo normal, cuya subida
+ * recibe 403 y vuelve a leer la config. Solo se escribe cuando cambia. */
+bool settings_camera_enabled();
+bool settings_set_camera_enabled(bool enabled);
 
 /* --- OTA (E5) ---------------------------------------------------------------*/
 uint32_t settings_rejected_ota_version();  // 0 = ninguna

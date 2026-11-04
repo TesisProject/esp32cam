@@ -21,6 +21,7 @@ static const char *kKeyCapture    = "capture";
 static const char *kKeyCfgRev     = "cfg_rev";
 static const char *kKeyOtaRej     = "ota_rej";
 static const char *kKeyBatCal     = "bat_cal";
+static const char *kKeyCamOff     = "cam_off";
 
 static Preferences s_prefs;
 static bool        s_open = false;
@@ -266,6 +267,17 @@ uint32_t settings_config_revision() { return s_open ? s_prefs.getUInt(kKeyCfgRev
 
 bool settings_set_config_revision(uint32_t revision) {
   return s_open && s_prefs.putUInt(kKeyCfgRev, revision) == sizeof(uint32_t);
+}
+
+/* ---------------------------------------------------------------------------
+ * Camara habilitada (HU-23)
+ * -------------------------------------------------------------------------*/
+bool settings_camera_enabled() { return !s_open || s_prefs.getUChar(kKeyCamOff, 0) == 0; }
+
+bool settings_set_camera_enabled(bool enabled) {
+  if (!s_open) return false;
+  if (settings_camera_enabled() == enabled) return true;   // sin cambio: no se gasta la flash
+  return s_prefs.putUChar(kKeyCamOff, enabled ? 0 : 1) == sizeof(uint8_t);
 }
 
 /* ---------------------------------------------------------------------------

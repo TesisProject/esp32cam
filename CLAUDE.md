@@ -394,9 +394,12 @@ Contrato del Fog (proveedor, fuente de verdad):
 `fog-application/src/firmware/router.py`, `service.py` (`firmware_block`) y
 `signing.py`; firma de la nube: `FirmwareManifest.canonicalString()`.
 
-- **Cuándo:** tras una subida 2xx, cada `OTA_CHECK_EVERY_CYCLES` (12 = 1 h)
-  ciclos, y en el primer ciclo bueno tras un arranque en frío, se pide
-  `GET /api/v1/camera/config`. Solo se lee su bloque `firmware`
+- **Cuándo:** la config (`GET /api/v1/camera/config`) se pide tras una subida
+  2xx cada `CONFIG_CHECK_EVERY_CYCLES` ciclos (10 = 5 min a 30 s), en el
+  primer ciclo bueno tras un arranque en frío y en cuanto una subida responde
+  `403`; la oferta de firmware de esa respuesta solo se mira cada
+  `OTA_CHECK_EVERY_CYCLES` = 3 600 000 / `CAPTURE_INTERVAL_MS` ciclos (**120
+  a 30 s**, 1 h; no 12, que era a 5 min). Para OTA solo se lee el bloque `firmware`
   (`{version, size, sha256, signature, url}` o `null`). **`wifi` se ignora
   siempre** (regla 1 de abajo), aunque el Fog lo mande.
 - **Qué se instala:** solo si `version > FW_VERSION` y `version != ota_rej`.
@@ -422,7 +425,28 @@ Contrato del Fog (proveedor, fuente de verdad):
   (`esp_ota_get_last_invalid_partition`), calcula el SHA-256 de sus primeros
   `size` bytes; si es el del `.bin` ofrecido, apunta esa versión en
   `ota_rej` y no la vuelve a descargar (sin esto: descarga y rollback cada
-  hora). Es la única escritura del cliente en la NVS (regla 6).
+  hora). Es la única escritura del cliente OTA en la NVS (regla 6); la otra
+  del ciclo es `cam_off` (abajo).
+
+## Cámara desactivada en la nube (HU-23)
+
+- La config del Fog trae `enabled`. `false` se guarda en la NVS (`cam_off`,
+  u8, solo se escribe cuando cambia; sin la clave = habilitada) y el ciclo
+  cambia: tras la batería, **sin encender el sensor**, WiFi + `GET` de la
+  config y deep sleep de `DISABLED_SLEEP_MS` (2 min, `config.h`).
+- Se entera de dos formas: la subida responde `403` (el Fog rechaza las
+  fotos de una cámara deshabilitada) y eso fuerza a releer la config en el
+  mismo ciclo, o la lectura periódica de cada `CONFIG_CHECK_EVERY_CYCLES`.
+- Al leer `enabled: true` borra la marca y duerme 1 s: el ciclo siguiente ya
+  es normal (captura). Reactivarla tarda ≤ `DISABLED_SLEEP_MS` + 1 min de sync
+  del Fog.
+- Sin respuesta del Fog (caído, `401`) sigue desactivada: la credencial
+  revocada la trata el ciclo normal al reactivarla.
+- Prueba en placa (no hay tests automáticos del firmware): desactivar la
+  cámara en la nube → en ≤ 1 min + 1 ciclo el log dice `UPLOAD: 403` y
+  `CONFIG: la camara pasa a DESHABILITADA`, y los ciclos siguientes
+  `SLEEP: durmiendo 120000 ms` sin `CAM:`; reactivarla → `HABILITADA` y en
+  el ciclo siguiente vuelve `UPLOAD: ok`.
 - **Autotest:** en cada `ESP_RST_POWERON` se verifica el vector de la nube
   (`cloud-service/src/test/resources/firmware/signature-test-vector.json`):
   v4 válida y la misma firma como v5 rechazada. Log:

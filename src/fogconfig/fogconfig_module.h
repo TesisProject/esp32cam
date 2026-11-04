@@ -1,7 +1,7 @@
 /* ============================================================================
  *  fogconfig_module.h  -  GET /api/v1/camera/config del Fog
  *
- *  Por ahora solo se interpreta el bloque "firmware" (E5). "capture" sera
+ *  Se interpretan "enabled" (HU-23) y el bloque "firmware" (E5). "capture" sera
  *  E8. "wifi" NO se lee nunca: la WiFi, el host del Fog y la credencial solo
  *  se graban por USB (decision del 2026-10-17, ver CLAUDE.md "OTA y
  *  configuracion por USB"). Si el Fog la manda, se ignora.
@@ -21,6 +21,8 @@ struct FirmwareOffer {
 };
 
 struct FogConfig {
+  bool          has_enabled;    // false: Fog anterior al campo; se trata como habilitada
+  bool          enabled;        // false: desactivada en la nube, no capturar
   bool          has_firmware;   // false: "firmware": null (nada asignado)
   FirmwareOffer firmware;
 };
