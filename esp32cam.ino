@@ -22,7 +22,8 @@
  *       interna para subirla en un ciclo con conexion (src/backlog/).
  *    6. Cada CONFIG_CHECK_EVERY_CYCLES ciclos con subida correcta (o en
  *       cuanto el Fog responde 403), pedir la config al Fog: si la camara
- *       esta desactivada en la nube, apuntarlo en la NVS y dormir. Cada
+ *       esta desactivada en la nube, apuntarlo en la NVS y dormir (same
+ *       for charging mode). Cada
  *       OTA_CHECK_EVERY_CYCLES, si esa config ofrece una version nueva con
  *       firma valida, instalarla y reiniciar (src/ota/).
  *    7. Apagar camara (PWDN + hold) y WiFi, y dormir CAPTURE_INTERVAL_MS.
@@ -30,6 +31,12 @@
  *  Camara desactivada (NVS cam_off, HU-23): tras la bateria, sin encender el
  *  sensor, solo WiFi + GET de la config. Si sigue desactivada, duerme
  *  DISABLED_SLEEP_MS; si ya no, lo apunta y vuelve enseguida al ciclo normal.
+ *
+ *  Charging mode (NVS cam_chg): after the battery, without turning on the
+ *  sensor, only WiFi + POST of the telemetry (FOG_TELEMETRY_PATH), whose
+ *  response carries the mode. Still charging: sleeps CHARGING_SLEEP_MS; no
+ *  longer charging: records it and goes straight back to the normal cycle.
+ *  Entered through the config (403 on upload or the periodic read).
  *
  *  Sin WiFi la foto se captura DESPUES del intento de conexion, igual que en
  *  un ciclo normal: esos segundos son los que dan tiempo al AEC/AGC del
@@ -239,6 +246,16 @@ static bool apply_enabled(const FogConfig &cfg) {
   return enabled;
 }
 
+/* Applies the config's "charging". Returns true if the camera is left in
+ * charging mode. Only writes the NVS when it changes. */
+static bool apply_charging(bool charging) {
+  if (charging != settings_camera_charging()) {
+    LOG("CONFIG: camera %s charging mode", charging ? "ENTERS" : "LEAVES");
+    settings_set_camera_charging(charging);
+  }
+  return charging;
+}
+
 /* Ciclo de una camara desactivada: sin sensor, solo WiFi + config. No vuelve
  * nunca: duerme DISABLED_SLEEP_MS o, si la reactivaron, un instante para
  * empezar ya un ciclo normal (desde cero: camara, WiFi y captura). */
@@ -249,6 +266,8 @@ static void disabled_cycle(const SettingsWifi &wifi, const SettingsFog &fog,
   if (!connected) go_to_sleep(DISABLED_SLEEP_MS);
   FogConfig cfg;
   if (fogconfig_fetch(fog.host, fog.port, cred.api_key, cred.api_token, cfg) && apply_enabled(cfg)) {
+    /* Re-enabled: it may come back straight into charging mode. */
+    apply_charging(cfg.has_charging && cfg.charging);
     s_config_countdown = 0;   // en el ciclo normal se vuelve a mirar la oferta de firmware
     go_to_sleep(1000);
   }
@@ -257,9 +276,67 @@ static void disabled_cycle(const SettingsWifi &wifi, const SettingsFog &fog,
   go_to_sleep(DISABLED_SLEEP_MS);
 }
 
+/* Charging-mode cycle: no sensor or flash, only WiFi + POST of the
+ * telemetry. The response carries the mode, so no config read is needed.
+ * Never returns: sleeps CHARGING_SLEEP_MS or, if the mode was turned off, a
+ * moment so a normal cycle starts right away. A failure (no WiFi, Fog down)
+ * does not leave the mode: it retries in CHARGING_SLEEP_MS. */
+static void charging_cycle(const SettingsWifi &wifi, const SettingsFog &fog,
+                           const SettingsCredential &cred, const BatteryReading &bat,
+                           esp_reset_reason_t reset_reason) {
+  LOG("CHARGE: camera in charging mode: no sensor or frame, telemetry only");
+  if (!wifi_connect(wifi.ssid, wifi.password)) {
+    s_wifi_fail_streak++;
+    go_to_sleep(CHARGING_SLEEP_MS);
+  }
+  const uint32_t wifi_fail_streak = s_wifi_fail_streak;   // the one from before connecting
+  s_wifi_fail_streak = 0;
+
+  UploadTelemetry t = {};
+  t.fw_version       = FW_VERSION;
+  t.rssi             = wifi_rssi();
+  t.wifi_connect_ms  = wifi_connect_ms();
+  t.reset_reason     = (int)reset_reason;
+  t.free_heap        = ESP.getFreeHeap();
+  t.wake_count       = s_wake_count;
+  t.wifi_fail_streak = wifi_fail_streak;
+  t.battery_valid    = bat.valid;
+  t.battery_mv       = bat.mv;
+  t.awake_ms         = millis();
+
+  TelemetryReply reply;
+  const int code = upload_telemetry(fog.host, fog.port, cred.api_key, cred.api_token, t, &reply);
+  if (code >= 200 && code < 300) {
+    /* Same as a frame upload: the Fog accepted an authenticated POST.
+     * Without this, an OTA image that enters charging mode before its first
+     * frame would roll back to the previous one on wake-up. */
+    ota_confirm_if_pending();
+    if (reply.has_mode && !reply.enabled) {
+      settings_set_camera_enabled(false);
+      go_to_sleep(DISABLED_SLEEP_MS);
+    }
+    if (reply.has_mode && !apply_charging(reply.charging)) {
+      s_config_countdown = 0;   // the normal cycle reads the config (and firmware offer) right away
+      go_to_sleep(1000);
+    }
+  } else if (code > 0) {
+    /* The Fog answered but did not accept the report: 403 if disabled,
+     * 404/405 for a Fog without charging mode. The config tells which cycle
+     * applies; without this a camera could stay in charging mode forever. */
+    LOG("CHARGE: %d, re-reading the config", code);
+    FogConfig cfg;
+    if (fogconfig_fetch(fog.host, fog.port, cred.api_key, cred.api_token, cfg)) {
+      if (!apply_enabled(cfg)) go_to_sleep(DISABLED_SLEEP_MS);
+      if (!apply_charging(cfg.has_charging && cfg.charging)) go_to_sleep(1000);
+    }
+  }
+  go_to_sleep(CHARGING_SLEEP_MS);
+}
+
 /* Tras una subida 2xx, cada CONFIG_CHECK_EVERY_CYCLES ciclos (o ya, con
  * force: el Fog respondio 403): config del Fog. Si la camara quedo
- * desactivada, duerme DISABLED_SLEEP_MS (no vuelve). Si no, cada
+ * desactivada, duerme DISABLED_SLEEP_MS (no vuelve). In charging mode it
+ * sleeps CHARGING_SLEEP_MS (does not return either). Si no, cada
  * OTA_CHECK_EVERY_CYCLES ciclos mira su oferta de firmware y, si trae una
  * version nueva, ota_handle_offer() (que reinicia si instala). Va despues de
  * las fotos atrasadas: un OTA reinicia y las dejaria sin subir. */
@@ -276,6 +353,9 @@ static void check_config(const SettingsFog &fog, const SettingsCredential &cred,
   FogConfig cfg;
   if (!fogconfig_fetch(fog.host, fog.port, cred.api_key, cred.api_token, cfg)) return;
   if (!apply_enabled(cfg)) go_to_sleep(DISABLED_SLEEP_MS);
+  /* The first charging report goes out after CHARGING_SLEEP_MS: this
+   * cycle's frame already carried the battery. */
+  if (apply_charging(cfg.has_charging && cfg.charging)) go_to_sleep(CHARGING_SLEEP_MS);
   if (force) return;   // tras un 403 que no era por estar deshabilitada: nada mas que hacer
 
   if (!OTA_ENABLED) return;
@@ -429,6 +509,11 @@ void setup() {
    * de encender el sensor: un ciclo deshabilitado no lo necesita. */
   if (!settings_camera_enabled()) disabled_cycle(wifi, fog, cred);   // no vuelve
 
+  /* --- Charging mode -------------------------------------------------------------
+   * After "disabled" (which takes precedence) and also before the sensor:
+   * it is not turned on while charging. */
+  if (settings_camera_charging()) charging_cycle(wifi, fog, cred, bat, reset_reason);   // no vuelve
+
   /* --- Camara --------------------------------------------------------------*/
   if (!camera_init()) {
     LOG("FATAL: la camara no arranca. Se aborta el ciclo y se duerme igual.");
@@ -502,10 +587,11 @@ void setup() {
       ota_confirm_if_pending();
     } else if (code == 403) {
       /* El Fog responde 403 a una camara deshabilitada: se relee la config ya
-       * (no en 10 ciclos) para dejar de capturar. Tampoco se guarda la foto. */
-      LOG("UPLOAD: 403, se relee la config por si la camara esta deshabilitada");
+       * (no en 10 ciclos) para dejar de capturar. Tampoco se guarda la foto.
+       * The Fog also answers 403 to a camera in charging mode. */
+      LOG("UPLOAD: 403, re-reading the config (camera disabled or charging?)");
       camera_release(fb);
-      check_config(fog, cred, bat, true);   // si esta deshabilitada, no vuelve
+      check_config(fog, cred, bat, true);   // si esta deshabilitada, no vuelve (nor when charging)
       go_to_sleep();
     } else if (code > 0 && code < 500) {
       /* 4xx: credencial mala, foto rechazada... Reintentarla mas tarde daria

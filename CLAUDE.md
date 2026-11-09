@@ -459,6 +459,32 @@ Contrato del Fog (proveedor, fuente de verdad):
 - **Banco:** `tools/ota_test` empuja un `.bin` a mano (sin firma) para
   probar el rollback sin el Fog.
 
+
+## Charging mode
+
+- The Fog config carries `charging` (set by the operator in the Cloud, `PUT
+  /api/v1/occupancy/cameras/{id}/charging`). `true` is stored in the NVS
+  (`cam_chg`, u8, only written when it changes; no key = not charging) and
+  the cycle changes: after the battery and after checking `cam_off`
+  (disabled wins), **without turning on the sensor or the flash**, WiFi +
+  `POST /api/v1/camera/telemetry` (multipart with only the cycle's
+  telemetry, no `file`, `framesize` or `jpeg_quality`) and deep sleep of
+  `CHARGING_SLEEP_MS` (5 min, `config.h`; must match the Cloud's
+  `Camera.CHARGING_REPORT_INTERVAL_SEC`).
+- It is entered like "disabled": the upload gets `403` (the Fog rejects
+  frames while charging) or the periodic config read.
+- The `202` response carries `{"enabled", "charging"}`: with `charging:
+  false` it clears the flag and sleeps 1 s (the next cycle captures), with no
+  separate config read. Any other Fog response (`403`, a Fog without the
+  endpoint) re-reads the config; with no WiFi or the Fog down it stays in
+  charging mode.
+- A `2xx` on the report also confirms a pending OTA image: without it, an
+  image that enters charging mode before its first frame would roll back.
+- On-board test (not compiled in the session that wrote it: compile and test
+  it): put the camera in charging mode → `UPLOAD: 403`, `CONFIG: camera
+  ENTERS charging mode`, `SLEEP: durmiendo 300000 ms`; following cycles
+  `CHARGE: POST ...` → `HTTP response 202` with no `CAM:`; turn the mode off
+  → `LEAVES charging mode` and the next cycle is `UPLOAD: ok` again.
 ## Fotos atrasadas (buffer en la flash interna)
 
 Si la foto del ciclo no se puede subir (sin WiFi, error de red o 5xx), se

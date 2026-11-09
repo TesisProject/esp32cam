@@ -22,6 +22,7 @@ static const char *kKeyCfgRev     = "cfg_rev";
 static const char *kKeyOtaRej     = "ota_rej";
 static const char *kKeyBatCal     = "bat_cal";
 static const char *kKeyCamOff     = "cam_off";
+static const char *kKeyCamChg     = "cam_chg";
 
 static Preferences s_prefs;
 static bool        s_open = false;
@@ -278,6 +279,17 @@ bool settings_set_camera_enabled(bool enabled) {
   if (!s_open) return false;
   if (settings_camera_enabled() == enabled) return true;   // sin cambio: no se gasta la flash
   return s_prefs.putUChar(kKeyCamOff, enabled ? 0 : 1) == sizeof(uint8_t);
+}
+
+/* ---------------------------------------------------------------------------
+ * Charging mode
+ * -------------------------------------------------------------------------*/
+bool settings_camera_charging() { return s_open && s_prefs.getUChar(kKeyCamChg, 0) != 0; }
+
+bool settings_set_camera_charging(bool charging) {
+  if (!s_open) return false;
+  if (settings_camera_charging() == charging) return true;   // unchanged: no flash write
+  return s_prefs.putUChar(kKeyCamChg, charging ? 1 : 0) == sizeof(uint8_t);
 }
 
 /* ---------------------------------------------------------------------------

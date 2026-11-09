@@ -31,7 +31,7 @@
  * una mayor que la mia?") sin parsear cadenas tipo "1.4.0". Viaja al Fog
  * como fw_version en cada POST y sale en el log de arranque.
  * SUBIRLO antes de compilar cualquier binario que vaya a otra placa. */
-#define FW_VERSION             6
+#define FW_VERSION             7
 
 /* ===========================================================================
  * 2. WIFI  (solo modo estacion: un AP propio impediria dormir la radio)
@@ -90,6 +90,7 @@
 #define FOG_HOST_MAX_LEN        63     // nombre o IP; mas largo = error al aprovisionar
 #define FOG_FRAMES_PATH         "/api/v1/camera/frames"
 #define FOG_CONFIG_PATH         "/api/v1/camera/config"   // de aqui sale la oferta de firmware (E5)
+#define FOG_TELEMETRY_PATH      "/api/v1/camera/telemetry"   // charging mode: telemetry without a frame
 #define FOG_PATH_MAX_LEN        63     // url relativa del .bin que da la config
 // Endpoint final construido en tiempo de ejecucion:
 //   http://<host de la NVS o defecto>:<puerto>/api/v1/camera/frames
@@ -119,6 +120,19 @@
  * cuesta solo WiFi + 1 GET (~2-3 s despierta), asi que la celda dura varias
  * veces mas que capturando cada 30 s, y reactivarla sigue tardando poco. */
 #define DISABLED_SLEEP_MS       120000UL
+
+/* Charging mode ("charging": true in the Fog config): the camera stays
+ * enabled but turns on neither the sensor nor the flash. Every
+ * CHARGING_SLEEP_MS it wakes up, connects and only sends its telemetry
+ * (POST FOG_TELEMETRY_PATH); the response carries "charging", so there is
+ * no separate config read. It lets a cell that is recharged on site (panel,
+ * charger) keep what it gains instead of spending it on captures: 10 times
+ * fewer cycles than at 30 s, each one without sensor or frame. Once the mode
+ * is turned off the camera captures again on the cycle after the report that
+ * says so: at most CHARGING_SLEEP_MS + 1 min of Fog sync. Must match the
+ * Cloud's Camera.CHARGING_REPORT_INTERVAL_SEC: the Cloud uses it to decide
+ * when the camera is offline. */
+#define CHARGING_SLEEP_MS       300000UL
 
 /* Cada cuantos ciclos con subida correcta se relee la config del Fog para
  * saber si sigue habilitada (aparte, y mas a menudo, que la oferta de OTA).

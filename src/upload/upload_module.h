@@ -58,3 +58,21 @@ int upload_frame(const char *fog_host, uint16_t fog_port,
                  const uint8_t *jpeg, size_t jpeg_len,
                  const UploadTelemetry *telemetry,
                  char *date_out = nullptr, size_t date_out_len = 0);
+
+/* Response of FOG_TELEMETRY_PATH: the camera's mode, so a charging cycle
+ * does not need a separate config read. */
+struct TelemetryReply {
+  bool has_mode;   // false: the response had no JSON with enabled/charging
+  bool enabled;    // false: disabled in the Cloud
+  bool charging;   // false: left charging mode, must capture again
+};
+
+/* Charging mode: multipart/form-data POST to the Fog with ONLY the cycle's
+ * telemetry, no "file" part (the camera does not turn on the sensor). Same
+ * text fields as upload_frame except the image ones (framesize,
+ * jpeg_quality) and captured_at. reply (optional) is filled from the JSON of
+ * a 2xx response. Returns the HTTP code, or a negative value if it failed
+ * before getting a response. */
+int upload_telemetry(const char *fog_host, uint16_t fog_port,
+                     const char *api_key, const char *api_token,
+                     const UploadTelemetry &telemetry, TelemetryReply *reply);

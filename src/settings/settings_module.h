@@ -134,6 +134,13 @@ bool     settings_set_config_revision(uint32_t revision);
 bool settings_camera_enabled();
 bool settings_set_camera_enabled(bool enabled);
 
+/* --- Charging mode ------------------------------------------------------------
+ * Last "charging" given by the Fog. No key = not charging: the worst case is
+ * a normal cycle, whose upload gets 403 and re-reads the config. Only written
+ * when it changes. */
+bool settings_camera_charging();
+bool settings_set_camera_charging(bool charging);
+
 /* --- OTA (E5) ---------------------------------------------------------------*/
 uint32_t settings_rejected_ota_version();  // 0 = ninguna
 bool     settings_set_rejected_ota_version(uint32_t version);

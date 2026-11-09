@@ -13,6 +13,7 @@
 
 #include <HTTPClient.h>
 #include <esp_heap_caps.h>
+#include "cJSON.h"
 
 static const char *kBoundary = "ESP32CAMBoundary7MA4YWxkTrZu0gW";
 
@@ -209,5 +210,94 @@ int upload_frame(const char *fog_host, uint16_t fog_port,
 
   http.end();
   free(body);
+  return code;
+}
+
+/* ---------------------------------------------------------------------------
+ * Charging mode: telemetry only
+ *
+ *  With no "file" part, the body is just s_head (~1 KB) and is sent as is,
+ *  without alloc_body. The fields are the cycle's: there is no backlog frame
+ *  and no image to describe here.
+ * -------------------------------------------------------------------------*/
+static size_t build_report(const UploadTelemetry &t) {
+  size_t len = 0;
+  const bool ok =
+      add_int  (len, "fw_version",       t.fw_version)       &&
+      add_int  (len, "reset_reason",     t.reset_reason)     &&
+      add_field(len, "battery_valid",    t.battery_valid ? "true" : "false") &&
+      (!t.battery_valid || add_int(len, "battery_mv", t.battery_mv)) &&
+      add_int  (len, "rssi",             t.rssi)             &&
+      add_uint (len, "wifi_connect_ms",  t.wifi_connect_ms)  &&
+      add_uint (len, "awake_ms",         t.awake_ms)         &&
+      add_uint (len, "free_heap",        t.free_heap)        &&
+      add_uint (len, "wake_count",       t.wake_count)       &&
+      add_uint (len, "wifi_fail_streak", t.wifi_fail_streak);
+  return ok ? len : 0;
+}
+
+/* The response is ~80 B. Anything much larger is not this acknowledgement. */
+static const int kMaxReplyBody = 1024;
+
+static void parse_reply(const String &body, TelemetryReply &out) {
+  cJSON *root = cJSON_Parse(body.c_str());
+  const cJSON *en  = cJSON_GetObjectItemCaseSensitive(root, "enabled");
+  const cJSON *chg = cJSON_GetObjectItemCaseSensitive(root, "charging");
+  /* Both or neither: with only one, the next cycle is unknown. */
+  out.has_mode = cJSON_IsObject(root) && cJSON_IsBool(en) && cJSON_IsBool(chg);
+  out.enabled  = out.has_mode ? cJSON_IsTrue(en) : true;
+  out.charging = out.has_mode ? cJSON_IsTrue(chg) : true;
+  cJSON_Delete(root);
+}
+
+int upload_telemetry(const char *fog_host, uint16_t fog_port,
+                     const char *api_key, const char *api_token,
+                     const UploadTelemetry &telemetry, TelemetryReply *reply) {
+  if (reply) *reply = {};
+  if (!fog_host || fog_host[0] == '\0' || fog_port == 0) {
+    LOG("CHARGE: no Fog host/port, not reporting");
+    return -1;
+  }
+  if (!api_key || api_key[0] == '\0' || !api_token || api_token[0] == '\0') {
+    LOG("CHARGE: no credential, not reporting (the Fog would answer 401)");
+    return -1;
+  }
+
+  size_t len = build_report(telemetry);
+  if (len == 0) {
+    LOG("CHARGE: telemetry does not fit in the buffer, not reporting");
+    return -1;
+  }
+  const int tail = snprintf(s_head + len, sizeof(s_head) - len, "--%s--\r\n", kBoundary);
+  if (tail < 0 || (size_t)tail >= sizeof(s_head) - len) return -1;
+  len += (size_t)tail;
+
+  LOG("CHARGE: telemetry fw=%d rssi=%d wifi_ms=%lu reset=%d awake_ms=%lu heap=%lu "
+      "wake=%lu wifi_fails=%lu bat=%ld mV%s",
+      telemetry.fw_version, telemetry.rssi, (unsigned long)telemetry.wifi_connect_ms,
+      telemetry.reset_reason, (unsigned long)telemetry.awake_ms,
+      (unsigned long)telemetry.free_heap, (unsigned long)telemetry.wake_count,
+      (unsigned long)telemetry.wifi_fail_streak, (long)telemetry.battery_mv,
+      telemetry.battery_valid ? "" : " (invalid, not sent)");
+
+  const String url = String("http://") + fog_host + ":" + (unsigned)fog_port + FOG_TELEMETRY_PATH;
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(WIFI_CONNECT_TIMEOUT_MS);
+  http.addHeader("X-API-Key", api_key);
+  http.addHeader("X-API-Token", api_token);
+  http.addHeader("Content-Type", String("multipart/form-data; boundary=") + kBoundary);
+
+  LOG("CHARGE: POST %s (%u bytes)", url.c_str(), (unsigned)len);
+  const int code = http.POST((uint8_t *)s_head, len);
+  if (code > 0) {
+    LOG("CHARGE: HTTP response %d", code);
+    if (reply && code >= 200 && code < 300 && http.getSize() <= kMaxReplyBody) {
+      parse_reply(http.getString(), *reply);
+    }
+  } else {
+    LOG("CHARGE: connection failed (%s)", http.errorToString(code).c_str());
+  }
+  http.end();
   return code;
 }
