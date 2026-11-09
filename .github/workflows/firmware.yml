@@ -1,0 +1,134 @@
+# Builds the firmware on every push and pull request, and publishes a GitHub Release with the
+# binaries when a version tag is pushed.
+#
+#   push / pull_request      -> compile, upload the binaries as a workflow artifact (30 days)
+#   tag fw-v<FW_VERSION>     -> compile, check the tag matches FW_VERSION in config.h, create the
+#                               release with the binaries
+#
+# Same core and FQBN as a local build (see CLAUDE.md, "Build"). Do not switch the partition scheme
+# to Huge APP: it has a single app slot and breaks OTA and rollback.
+#
+# The binaries are not signed: OTA signing happens in the Cloud when the release is registered.
+name: Firmware
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["fw-v*"]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ESP32_CORE_VERSION: "3.3.12"
+  ESP32_INDEX_URL: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+  FQBN: esp32:esp32:esp32cam:PartitionScheme=min_spiffs
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      fw_version: ${{ steps.version.outputs.fw_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read FW_VERSION
+        id: version
+        run: |
+          fw_version=$(sed -nE 's/^#define FW_VERSION[[:space:]]+([0-9]+).*/\1/p' config.h)
+          if [ -z "$fw_version" ]; then
+            echo "::error::FW_VERSION not found in config.h"
+            exit 1
+          fi
+          echo "fw_version=$fw_version" >> "$GITHUB_OUTPUT"
+          echo "FW_VERSION=$fw_version"
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      # The core and its toolchain are ~1.8 GB: cache them per core version.
+      - name: Cache ESP32 core
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15/packages
+            ~/.arduino15/staging
+          key: esp32-core-${{ env.ESP32_CORE_VERSION }}
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core update-index --additional-urls "$ESP32_INDEX_URL"
+          arduino-cli core install "esp32:esp32@$ESP32_CORE_VERSION" --additional-urls "$ESP32_INDEX_URL"
+
+      - name: Compile
+        run: |
+          arduino-cli compile --fqbn "$FQBN" --build-path build --warnings default . \
+            --additional-urls "$ESP32_INDEX_URL" | tee compile.log
+
+      - name: Collect binaries
+        run: |
+          v=${{ steps.version.outputs.fw_version }}
+          mkdir -p dist
+          cp build/esp32cam.ino.bin        "dist/esp32cam-fw$v.bin"
+          cp build/esp32cam.ino.merged.bin "dist/esp32cam-fw$v-merged.bin"
+          cp build/esp32cam.ino.elf        "dist/esp32cam-fw$v.elf"
+          (cd dist && sha256sum * > SHA256SUMS)
+          {
+            echo "### Firmware $v"
+            echo
+            echo '```'
+            grep -E "^(Sketch uses|Global variables)" compile.log || true
+            echo '```'
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32cam-fw${{ steps.version.outputs.fw_version }}-${{ github.sha }}
+          path: dist/
+          retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/fw-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check tag matches FW_VERSION
+        run: |
+          expected="fw-v${{ needs.build.outputs.fw_version }}"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match FW_VERSION in config.h (expected $expected)"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: esp32cam-fw${{ needs.build.outputs.fw_version }}-${{ github.sha }}
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${{ needs.build.outputs.fw_version }}
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Firmware $v" \
+            --notes "$(printf '%s\n' \
+              "FW_VERSION $v, core esp32 ${ESP32_CORE_VERSION}, FQBN \`${FQBN}\`." \
+              "" \
+              "- \`esp32cam-fw$v.bin\`: app only, for OTA or esptool at \`0x10000\`." \
+              "- \`esp32cam-fw$v-merged.bin\`: full image (bootloader, partitions, app), esptool at \`0x0\`." \
+              "- \`esp32cam-fw$v.elf\`: symbols, to decode backtraces." \
+              "" \
+              "Unsigned: OTA signing happens in the Cloud.")"

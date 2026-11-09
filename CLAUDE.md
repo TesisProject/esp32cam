@@ -42,6 +42,15 @@ compilar desde aquí**:
 arduino-cli compile --fqbn esp32:esp32:esp32cam:PartitionScheme=min_spiffs --build-path build .
 ```
 
+**CI (`.github/workflows/firmware.yml`).** Every push and pull request
+compiles with the same core and FQBN and uploads the binaries as a workflow
+artifact (30 days). To publish a version: bump `FW_VERSION`, push, then push
+the tag `fw-v<FW_VERSION>` (e.g. `git tag fw-v7 && git push origin fw-v7`); the
+workflow checks the tag matches `config.h` and creates a GitHub Release with
+`esp32cam-fwN.bin` (OTA / `0x10000`), `esp32cam-fwN-merged.bin` (USB, `0x0`),
+the `.elf` and `SHA256SUMS`. The binaries are unsigned: OTA signing stays in
+the Cloud.
+
 En VS Code, `.vscode/tasks.json` tiene Verificar / Subir / Monitor serie
 (`Ctrl+Shift+B` = Verificar), con ese mismo FQBN en las tres tareas que lo
 llevan. `build/` y `.vscode/` están en `.gitignore`.
