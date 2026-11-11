@@ -102,6 +102,7 @@ esp32cam/                       ← carpeta = nombre del .ino (lo exigen IDE y C
 ├── tools/wifi_rssi/            Sketch aparte: RSSI de la red (serie + web + LED); lee la WiFi de la NVS
 ├── tools/ota_test/             Sketch aparte de banco: recibe un .bin por HTTP (sin auth) para probar OTA y rollback
 ├── tools/live_monitor/         Sketch aparte: vídeo MJPEG en vivo + batería + RSSI en una web; lee la NVS
+├── hardware/                   Energía solar (topología, cableado, corte) y modelos 3D de caja y case; no se compila
 └── src/
     ├── camera/camera_module.*  OV2640: init, captura, PWDN + hold para deep sleep
     ├── wifi/wifi_module.*      Estación: conexión con timeout, MAC, IP fija, apagado
